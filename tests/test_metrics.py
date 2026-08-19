@@ -6,6 +6,7 @@ import numpy as np
 from optical_dsp.analysis.metrics import (
     HD_FEC_RS255_239,
     STRONG_FEC_RS255_213,
+    adc_target_metrics,
     apply_fec,
     evm_rms,
     measure_ber,
@@ -106,3 +107,24 @@ def test_post_fec_ber_monotonic_and_bounded() -> None:
         prev = post
     assert apply_fec(0.0, HD_FEC_RS255_239) == 0.0
     assert apply_fec(0.5, HD_FEC_RS255_239) == 0.5
+
+
+def test_adc_target_metrics_symmetric_clean_levels() -> None:
+    # ideal QPSK at 4 samples/symbol: symmetric rails, no clipping
+    rng = np.random.default_rng(0)
+    const = QPSK()
+    sym = const.symbols[rng.integers(0, 4, 8192)]
+    sig = np.repeat(sym, 4)
+    sig = sig + 0.001 * (rng.standard_normal(sig.size) + 1j * rng.standard_normal(sig.size))
+    i_res, q_res = adc_target_metrics(sig, 4)
+    assert abs(i_res.level_pos + i_res.level_neg) < 1e-3  # symmetric around 0
+    assert np.isclose(i_res.spacing, i_res.level_pos - i_res.level_neg)
+    assert np.isclose(q_res.spacing, i_res.spacing, rtol=0.05)
+    assert i_res.clip_fraction == 0.0
+    assert i_res.eye_opening_db > 10.0
+
+
+def test_adc_target_metrics_tiny_signal_returns_nan() -> None:
+    i_res, q_res = adc_target_metrics(np.zeros(8, dtype=np.complex128), 4)
+    assert np.isnan(i_res.vpp)
+    assert np.isnan(q_res.vpp)

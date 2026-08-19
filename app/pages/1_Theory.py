@@ -173,6 +173,41 @@ def main() -> None:
         "only has to clean residual crosstalk and gain/phase drift."
     )
 
+    _h("5.1 Receiver ADC target specification")
+    _md(
+        "For QPSK the photodiode + TIA output handed to the ADC should meet "
+        "the following target, so that the DSP sees clean, evenly spaced "
+        "levels (the dashboard reports these quantities for every run):"
+    )
+    _md(
+        "- **Four symbol levels, two per quadrature** — the I branch swings "
+        "between $+V_\\mathrm{pp}/2$ and $-V_\\mathrm{pp}/2$, and the Q branch "
+        "between $\\pm V_\\mathrm{pp}/2$, giving the four QPSK constellation "
+        "points $\\{(\\pm V_\\mathrm{pp}/2,\\ \\pm V_\\mathrm{pp}/2)\\}$."
+        "- **Equal spacing** — the two levels are separated by $V_\\mathrm{pp}$, "
+        "the same on both branches, which maximises the Euclidean distance "
+        "between symbols for a fixed peak swing."
+        "- **Full ADC-range utilisation without saturation** — the peak "
+        "amplitude sits just below the quantiser full scale $\\pm V_\\mathrm{sat}$; "
+        "no sample is clipped."
+        "- **Symmetrical swing** — the level pair is centred on 0 V, keeping "
+        "the quadrature balance (bias ~ 0)."
+    )
+    _md(
+        "In practice these settings are achieved by tuning the **modulator "
+        "bias points** (to centre the swing), the **LO power** (to set the "
+        "signal level at the photodiodes) and the **TIA gain** (to fill the "
+        "ADC range). Note that the *eye* at the ADC input may still look "
+        "closed: chromatic dispersion smears the signal before it is "
+        "compensated in the DSP, so the level targets above (swing, symmetry, "
+        "spacing, no clipping) are about the voltage placement, and the eye "
+        "opens fully only after CDC — matching the post-DSP eye on the main "
+        "page. Meeting the target gives the equalizer the SNR it needs to "
+        "compensate residual dispersion and PMD, and minimises the BER for a "
+        "given OSNR; the pre-DSP eye, the level histogram and the post-DSP "
+        "eye on the main page show exactly this."
+    )
+
     _h("6. MIMO equalizer")
     _md(
         "A T-spaced $2\\times 2$ FIR filter with 15 taps per path inverts the "

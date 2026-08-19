@@ -234,3 +234,88 @@ def evm_to_snr_db(evm_percent: float) -> float:
     """SNR implied by an RMS-EVM percentage (for unit-power constellations)."""
     snr: float = 20.0 * float(np.log10(100.0 / max(evm_percent, 1e-12)))
     return snr
+
+
+@dataclass(frozen=True)
+class BranchLevels:
+    """Measured ADC input levels of one quadrature branch (I or Q).
+
+    Levels are the centroids of the positive/negative sample clusters taken
+    at the best sampling instant (max symbol variance over the ``sps``
+    offsets). ``vpp`` is the peak-to-peak swing between them, ``spacing`` the
+    adjacent-level step, ``bias`` the DC offset of the pair, ``eye_opening_db``
+    the level separation relative to the pooled in-cluster noise, and
+    ``clip_fraction`` the share of samples beyond the ADC full scale
+    (``clip_sigma`` x RMS).
+    """
+
+    vpp: float
+    level_pos: float
+    level_neg: float
+    bias: float
+    spacing: float
+    clip_fraction: float
+    eye_opening_db: float
+    sampling_offset: int
+    n_sampled: int
+
+
+def _cluster_levels(values: NDArray[np.float64]) -> tuple[float, float, float]:
+    """Centroids and pooled noise of the positive/negative sample clusters."""
+    pos = values[values > 0.0]
+    neg = values[values < 0.0]
+    if pos.size == 0 or neg.size == 0:
+        return float("nan"), float("nan"), float("nan")
+    lp = float(np.mean(pos))
+    ln = float(np.mean(neg))
+    noise = float(np.sqrt(0.5 * (np.var(pos) + np.var(neg))))
+    return lp, ln, noise
+
+
+def adc_target_metrics(
+    signal: NDArray[np.complex128],
+    sps: int,
+    clip_sigma: float = 3.5,
+) -> tuple[BranchLevels, BranchLevels]:
+    """Quantify the ADC input against the receiver level specification.
+
+    Returns ``(I, Q)`` level measurements of the signal handed to the ADC
+    (photodiode + TIA output, before any DSP). For QPSK each branch should
+    show two levels at ``+-Vpp/2``: equal ``spacing`` on both branches,
+    near-zero ``bias`` (symmetric swing) and ``clip_fraction`` at zero.
+    """
+    n = len(signal) // sps * sps
+    if n < 2 * sps:
+        nan = float("nan")
+        empty = BranchLevels(nan, nan, nan, nan, nan, nan, nan, 0, 0)
+        return empty, empty
+    s = signal[:n].reshape(-1, sps)
+    off = int(np.argmax(np.var(s.real, axis=0) + np.var(s.imag, axis=0)))
+    out: list[BranchLevels] = []
+    for values in (s[:, off].real, s[:, off].imag):
+        lp, ln, noise = _cluster_levels(values)
+        rms = float(np.sqrt(float(np.mean(values**2))))
+        full_scale = clip_sigma * rms
+        clip = float(np.mean(np.abs(values) > full_scale)) if rms > 0.0 else 0.0
+        vpp = lp - ln
+        bias = 0.5 * (lp + ln)
+        opening: float
+        if vpp > 0.0 and noise > 0.0:
+            opening = float(20.0 * np.log10(vpp / (2.0 * noise)))
+        else:
+            opening = float("nan")
+        out.append(
+            BranchLevels(
+                vpp=float(vpp),
+                level_pos=lp,
+                level_neg=ln,
+                bias=float(bias),
+                spacing=float(vpp),
+                clip_fraction=clip,
+                eye_opening_db=opening,
+                sampling_offset=off,
+                n_sampled=int(values.size),
+            )
+        )
+    i_res, q_res = out
+    return i_res, q_res

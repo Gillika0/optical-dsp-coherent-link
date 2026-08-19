@@ -17,12 +17,14 @@ import streamlit as st
 from optical_dsp.analysis.metrics import (
     HD_FEC_RS255_239,
     STRONG_FEC_RS255_213,
+    adc_target_metrics,
     apply_fec,
     evm_to_snr_db,
     q_factor_from_ber,
     theoretical_ber_qam,
 )
 from optical_dsp.analysis.visualization import (
+    plot_adc_level_hist,
     plot_constellation,
     plot_convergence,
     plot_eye,
@@ -299,6 +301,46 @@ def _constellation_tabs(res: LinkResult) -> None:
         )
 
 
+def _adc_spec_section(res: LinkResult) -> None:
+    st.header("Receiver ADC target specification")
+    i_res, q_res = adc_target_metrics(res.eye_pre[:, 0], res.config.sps)
+    st.plotly_chart(
+        plot_adc_level_hist(res.eye_pre[:, 0], res.config.sps),
+        use_container_width=True,
+    )
+    c1, c2, c3 = st.columns(3)
+    lvl_i = f"{i_res.level_neg:.3f} / {i_res.level_pos:+.3f}"
+    lvl_q = f"{q_res.level_neg:.3f} / {q_res.level_pos:+.3f}"
+    with c1:
+        st.metric("I levels (V)", lvl_i, "target ±Vpp/2")
+        st.metric("Q levels (V)", lvl_q, "target ±Vpp/2")
+    with c2:
+        st.metric("I/Q spacing (V)", f"{i_res.spacing:.3f} / {q_res.spacing:.3f}", "equal steps")
+        st.metric("Symmetry bias (V)", f"{i_res.bias:+.3f} / {q_res.bias:+.3f}", "target 0")
+    with c3:
+        st.metric("Clipping", f"{100 * i_res.clip_fraction:.3f}%", "target 0%")
+        st.metric("Eye opening SNR", f"{i_res.eye_opening_db:.1f} dB", "at sampling point")
+    spacing_mismatch = (
+        abs(i_res.spacing - q_res.spacing) / max(i_res.spacing, q_res.spacing, 1e-12) * 100
+    )
+    st.caption(
+        "Measured on the photodiode + TIA output handed to the ADC (pre-DSP, "
+        "best sampling instant). For QPSK each branch shows two symmetric "
+        "levels at ±Vpp/2; the spacing mismatch, bias and clipping should be "
+        "near zero (the ADC full scale is auto-set to 3.5× RMS, so clipping "
+        "stays at 0%). The eye-opening SNR falls as chromatic dispersion "
+        "smears the signal before CDC — that is why the ADC eye can look "
+        "closed while the post-DSP eye below is wide open. These are the "
+        "levels the modulator bias, LO power and TIA gain are tuned to "
+        "achieve."
+        + (
+            f" Spacing mismatch: {spacing_mismatch:.2f}%."
+            if spacing_mismatch == spacing_mismatch
+            else ""
+        )
+    )
+
+
 def _eye_psd_tabs(res: LinkResult) -> None:
     st.header("Eye diagrams (pre vs post DSP)")
     tab_x, tab_y, tab_psd = st.tabs(["Polarisation X", "Polarisation Y", "Power spectrum"])
@@ -364,6 +406,7 @@ def main() -> None:
         st.warning("Sidebar settings changed since the last run - press Run again.")
     _show_metrics(res)
     _constellation_tabs(res)
+    _adc_spec_section(res)
     _eye_psd_tabs(res)
 
     st.header("Equalizer adaptation error")
