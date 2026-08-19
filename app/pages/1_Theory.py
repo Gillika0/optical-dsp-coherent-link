@@ -173,11 +173,13 @@ def main() -> None:
         "only has to clean residual crosstalk and gain/phase drift."
     )
 
-    _h("5.1 Receiver ADC target specification")
+    _h("5.1 Voltage level specification (receiver target)")
     _md(
-        "For QPSK the photodiode + TIA output handed to the ADC should meet "
-        "the following target, so that the DSP sees clean, evenly spaced "
-        "levels (the dashboard reports these quantities for every run):"
+        "The primary receiver design target is a set of **voltage levels at "
+        "the ADC input**, not the eye diagram: the eye is only the result of "
+        "achieving those levels. For QPSK the photodiode + TIA output handed "
+        "to the ADC should meet the following specification (the dashboard "
+        "reports the measured values for every run):"
     )
     _md(
         "- **Four symbol levels, two per quadrature** — the I branch swings "
