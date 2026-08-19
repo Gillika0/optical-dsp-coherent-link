@@ -67,12 +67,17 @@ def plot_eye(
     max_traces: int = 600,
     normalize: bool = True,
 ) -> go.Figure:
-    """Overlaid 2-T eye diagram for the requested quadrature branches.
+    """Density eye diagram, one subplot per quadrature branch.
 
-    The signal is normalised to unit peak envelope so the eye fills the plot
-    regardless of the optical power arriving at the receiver (a µW-level ADC
-    output would otherwise render as a barely visible flat line).
+    A 2-D histogram of ``(time, amplitude)`` over many 2-symbol windows is far
+    more readable than raw overlaid polylines (which smear into a blob at
+    high OSNR): the rails light up as bright horizontal bands and the symbol
+    transitions as crossing paths. The signal is normalised to unit peak
+    envelope so the eye fills the plot regardless of the received optical
+    power. For QPSK each branch shows two rails; for 16-QAM four.
     """
+    from plotly.subplots import make_subplots
+
     period = 2 * sps
     n = len(signal)
     frames = n // period * period
@@ -81,31 +86,49 @@ def plot_eye(
         peak = float(np.percentile(np.abs(signal), 99.0))
         if peak > 0.0:
             eye = eye / peak
+    # cap the number of 2-symbol windows fed to the histogram
+    stride = max(1, int(np.ceil(eye.shape[0] / 4000)))
+    eye = eye[::stride]
     t = np.arange(period) / sps
-    fig = go.Figure()
-    for branch in branches:
+    tt = np.tile(t, eye.shape[0])
+
+    colors = {"I": "#1f77b4", "Q": "#d62728"}
+    fig = make_subplots(
+        rows=1,
+        cols=len(branches),
+        subplot_titles=[f"{b} branch" for b in branches],
+        shared_yaxes=True,
+    )
+    for idx, branch in enumerate(branches, start=1):
         data = eye.real if branch == "I" else eye.imag
-        if eye.shape[0] > max_traces:
-            stride = int(np.ceil(eye.shape[0] / max_traces))
-            data = data[::stride]
-        tt = np.tile(t, data.shape[0])
-        color = "#2ca02c" if branch == "I" else "#d62728"
+        c = colors.get(branch, "#1f77b4")
         fig.add_trace(
-            go.Scatter(
+            go.Histogram2d(
                 x=tt,
                 y=data.ravel(),
-                mode="lines",
-                line={"width": 0.7, "color": color},
-                opacity=0.3,
-                name=branch,
-                showlegend=False,
-            )
+                xbins={"start": 0.0, "end": 2.0, "size": 2.0 / 100.0},
+                ybins={"start": -1.3, "end": 1.3, "size": 2.6 / 120.0},
+                colorscale=[[0.0, "#ffffff"], [0.35, "#deebf7"], [1.0, c]],
+                showscale=False,
+                zsmooth="best",
+                hovertemplate="t=%{x:.2f}<br>amp=%{y:.2f}<br>samples=%{z}<extra></extra>",
+            ),
+            row=1,
+            col=idx,
         )
-    # guide lines at the nominal sampling instants (mid-symbol)
-    for x_pos in (0.5, 1.5):
-        fig.add_vline(x=x_pos, line_dash="dot", line_color=_PLOTLY_GREY, opacity=0.6)
+        fig.add_vline(x=0.5, line_dash="dot", line_color=_PLOTLY_GREY, opacity=0.6, row=1, col=idx)
+        fig.add_vline(x=1.5, line_dash="dot", line_color=_PLOTLY_GREY, opacity=0.6, row=1, col=idx)
     fig.add_hline(y=0.0, line_dash="dash", line_color=_PLOTLY_GREY, opacity=0.5)
-    fig.update_layout(**_base_layout(title, "Time / symbol periods", "Amplitude (normalised)"))
+    fig.update_layout(
+        title=title,
+        height=420,
+        template="plotly_white",
+        font={"size": 12},
+        margin={"l": 60, "r": 20, "t": 60, "b": 50},
+        showlegend=False,
+    )
+    fig.update_xaxes(title_text="Time / symbol periods", row=1, col=1)
+    fig.update_yaxes(title_text="Amplitude (normalised)", row=1, col=1)
     return fig
 
 
@@ -342,27 +365,54 @@ def plot_penalty_sweep(
     return fig
 
 
-def plot_convergence(err_history: Sequence[float], use_log: bool = True) -> go.Figure:
-    """Mean absolute adaptation-error vs symbol index (equalizer).
+def plot_convergence(
+    err_history: Sequence[float],
+    use_log: bool = True,
+    switch_at: int | None = None,
+) -> go.Figure:
+    """Blind equalizer adaptation error vs symbol index.
 
-    ``err_history`` holds one mean-|e| value per adaptation block (a few
-    tens of symbols), so the curve shows the CMA acquisition transient
-    followed by the MMA/DD steady state.
+    Each point is the mean absolute adaptation error over a block of 64
+    symbols. The curve falls from the CMA acquisition transient toward a
+    steady-state floor set by the residual noise (the same noise that shows
+    up as EVM); ``switch_at`` marks the CMA→MMA handover used for
+    higher-order QAM.
     """
     fig = go.Figure()
     y = list(err_history)
     if use_log:
         y = [max(float(v), 1e-12) for v in y]
         y = [np.log10(v) for v in y]
+    x = list(range(len(y)))
     fig.add_trace(
         go.Scatter(
-            x=list(range(len(y))),
+            x=x,
             y=y,
-            mode="lines",
+            mode="lines+markers",
             name="adaptation error",
             line={"color": "#ff7f0e", "width": 1.5},
+            marker={"size": 4, "color": "#ff7f0e"},
         )
     )
+    if switch_at is not None and 0 < switch_at < len(y):
+        fig.add_vline(
+            x=switch_at,
+            line_dash="dot",
+            line_color="#2ca02c",
+            opacity=0.8,
+            annotation_text="CMA→MMA",
+            annotation_position="top left",
+        )
+    if y:
+        fig.add_hline(
+            y=y[-1],
+            line_dash="dash",
+            line_color="#999999",
+            opacity=0.7,
+            annotation_text="steady-state floor",
+            annotation_position="bottom right",
+        )
     ylabel = "log10(mean |e|)" if use_log else "mean |e|"
-    fig.update_layout(**_base_layout("Equalizer convergence", "Adaptation block", ylabel))
+    title = "Equalizer adaptation error"
+    fig.update_layout(**_base_layout(title, "Block index (64 symbols)", ylabel))
     return fig

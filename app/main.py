@@ -366,8 +366,21 @@ def main() -> None:
     _constellation_tabs(res)
     _eye_psd_tabs(res)
 
-    st.header("Equalizer convergence")
-    st.plotly_chart(plot_convergence(res.equalizer_errors), use_container_width=True)
+    st.header("Equalizer adaptation error")
+    const = get_constellation(cfg.modulation)
+    cma_preamble = min(cfg.n_cma if cfg.n_cma is not None else 4000, 1200)
+    switch_at = int(np.ceil(cma_preamble / 64.0)) if const.order > 4 else None
+    st.plotly_chart(
+        plot_convergence(res.equalizer_errors, switch_at=switch_at),
+        use_container_width=True,
+    )
+    st.caption(
+        "Each point is the mean absolute adaptation error over 64 symbols. It "
+        "drops as the filter locks on, then settles on a steady-state floor set "
+        "by the residual noise (the same noise that appears as EVM). For "
+        "16/64-QAM the green dotted line marks the handover from the CMA "
+        "acquisition preamble to the MMA steady state."
+    )
 
     st.header("Waterfall (BER vs OSNR, theory vs simulation)")
     st.plotly_chart(

@@ -111,7 +111,7 @@ def main() -> None:
         "$\\Delta z$:"
     )
     _math(
-        r"E(z+\Delta z) \approx"
+        r"E(z+\Delta z) \approx "
         r"e^{-\mathrm{j}\frac{\beta_2}{2}\omega^2\Delta z}"
         r"\,e^{-\alpha\Delta z/2}\,e^{\,\mathrm{j}\gamma\frac{8}{9}\|E\|^2\Delta z}\,E(z)"
     )
@@ -250,8 +250,8 @@ def main() -> None:
         "symbol errors per codeword is binomial$(n, p_s)$."
     )
     _math(
-        r"p_s = 1-(1-p)^8,\qquad"
-        r"X \sim \mathrm{Binomial}(n, p_s),\qquad"
+        r"p_s = 1-(1-p)^8,\qquad "
+        r"X \sim \mathrm{Binomial}(n, p_s),\qquad "
         r"P_{b,\mathrm{post}} = \frac{1}{2n}"
         r"\sum_{j=t+1}^{n} j \binom{n}{j} p_s^j (1-p_s)^{n-j}"
     )
