@@ -14,7 +14,14 @@ import warnings
 
 import numpy as np
 import streamlit as st
-from optical_dsp.analysis.metrics import evm_to_snr_db, q_factor_from_ber, theoretical_ber_qam
+from optical_dsp.analysis.metrics import (
+    HD_FEC_RS255_239,
+    STRONG_FEC_RS255_213,
+    apply_fec,
+    evm_to_snr_db,
+    q_factor_from_ber,
+    theoretical_ber_qam,
+)
 from optical_dsp.analysis.visualization import (
     plot_constellation,
     plot_convergence,
@@ -23,7 +30,7 @@ from optical_dsp.analysis.visualization import (
     plot_waterfall,
 )
 from optical_dsp.pipeline import LinkConfig, LinkResult, run_link
-from optical_dsp.utils import get_constellation
+from optical_dsp.utils import get_constellation, ref_bandwidth_hz
 
 warnings.filterwarnings("ignore")
 
@@ -43,6 +50,8 @@ def _build_config(
     bps_phases: int,
     n_symbols: int,
     seed: int,
+    n_spans: int,
+    fec: str,
 ) -> LinkConfig:
     return LinkConfig(
         modulation=modulation,
@@ -59,6 +68,8 @@ def _build_config(
         bps_phases=bps_phases,
         n_symbols=n_symbols,
         seed=seed,
+        n_spans=n_spans,
+        fec=fec,
     )
 
 
@@ -69,26 +80,61 @@ def _run_cached(cfg: LinkConfig) -> LinkResult:
 
 @st.cache_data(show_spinner=False)
 def _waterfall_cached(
-    modulation: str, symbol_rate_gbd: float, length_km: float, seed: int
-) -> tuple[list[float], list[float], list[float]]:
-    osnr_grid = np.linspace(10.0, 24.0, 8)
+    modulation: str,
+    symbol_rate_gbd: float,
+    length_km: float,
+    seed: int,
+    n_spans: int,
+    fec: str,
+) -> tuple[list[float], list[float], list[float], list[float], list[float]]:
+    grids = {
+        "QPSK": np.linspace(10.0, 18.0, 6),
+        "16-QAM": np.linspace(16.0, 26.0, 6),
+        "64-QAM": np.linspace(20.0, 30.0, 6),
+    }
+    osnr_grid = grids[modulation]
     const = get_constellation(modulation)
     ber_sim: list[float] = []
     ber_theory: list[float] = []
+    ber_sim_post: list[float] = []
+    ber_theory_post: list[float] = []
+    fec_code = None
+    if fec == "hd":
+        fec_code = HD_FEC_RS255_239
+    elif fec == "strong":
+        fec_code = STRONG_FEC_RS255_213
     for osnr_db in osnr_grid:
         cfg = LinkConfig(
             modulation=modulation,
-            n_symbols=2**11,
+            n_symbols=2**12,
             length_km=length_km,
             osnr_db=float(osnr_db),
             seed=seed,
-            mu_mma=1e-3,
+            n_spans=n_spans,
+            fec=fec,
         )
         r = run_link(cfg, quiet=True)
         ber_sim.append(r.ber.ber if r.ber is not None else 1.0)
-        snr_db = osnr_db + 10.0 * np.log10(12.5e9 / (symbol_rate_gbd * 1e9) / 2.0)
-        ber_theory.append(theoretical_ber_qam(float(snr_db), const.order))
-    return [float(osnr_db) for osnr_db in osnr_grid], ber_sim, ber_theory
+        # Per-polarisation SNR from OSNR: the amplifier scales the per-pol ASE
+        # so that n0 = Ps / (OSNR * B_ref); after the matched filter the per-pol
+        # symbol SNR is Es/N0 = OSNR * B_ref / Rs (no extra 3 dB).
+        ref_bw = ref_bandwidth_hz(1550.0e-9, 0.1)
+        snr_db = float(osnr_db + 10.0 * np.log10(ref_bw / (symbol_rate_gbd * 1e9)))
+        theory = theoretical_ber_qam(snr_db, const.order)
+        ber_theory.append(theory)
+        if fec_code is not None:
+            ber_sim_post.append(apply_fec(ber_sim[-1], fec_code))
+            ber_theory_post.append(apply_fec(theory, fec_code))
+        else:
+            ber_sim_post.append(ber_sim[-1])
+            ber_theory_post.append(theory)
+    return (
+        [float(osnr_db) for osnr_db in osnr_grid],
+        ber_sim,
+        ber_theory,
+        ber_sim_post,
+        ber_theory_post,
+    )
 
 
 def _sidebar() -> LinkConfig:
@@ -98,6 +144,11 @@ def _sidebar() -> LinkConfig:
         "Symbol rate (GBd)", min_value=4.0, max_value=128.0, value=32.0, step=4.0
     )
     length_km = st.sidebar.slider("Link length (km)", 5.0, 200.0, 80.0, step=5.0)
+    n_spans = st.sidebar.slider("Fibre spans / amplifiers", 1, 16, 1, step=1)
+    st.sidebar.caption(
+        "Each span is followed by an EDFA restoring the launch power; more "
+        "spans accumulate more nonlinear phase for the same end OSNR."
+    )
     launch_power_dbm = st.sidebar.slider("Launch power (dBm)", -10.0, 12.0, 0.0, step=1.0)
     osnr_db = st.sidebar.slider("Target OSNR (dB, 0.1 nm)", 8.0, 40.0, 22.0, step=1.0)
     tx_linewidth = st.sidebar.slider("TX linewidth (kHz)", 0.0, 2000.0, 100.0, step=10.0)
@@ -113,6 +164,22 @@ def _sidebar() -> LinkConfig:
     bps_phases = st.sidebar.slider("BPS phases / quadrant", 8, 128, 32, step=8)
     n_log2 = st.sidebar.slider("Symbols (2^n)", 10, 15, 12, step=1)
     seed = st.sidebar.number_input("Seed", value=1234, step=1)
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Forward error correction")
+    fec = st.sidebar.selectbox(
+        "FEC",
+        ["none", "hd", "strong"],
+        format_func=lambda v: {
+            "none": "Off",
+            "hd": "HD-FEC (7%, RS(255,239))",
+            "strong": "Strong FEC (20%, RS(255,213))",
+        }[v],
+        index=0,
+    )
+    st.sidebar.caption(
+        "Post-FEC BER is modelled with bounded-distance hard-decision decoding "
+        "of the RS code from the simulated (pre-FEC) BER."
+    )
 
     return _build_config(
         modulation=modulation,
@@ -129,6 +196,8 @@ def _sidebar() -> LinkConfig:
         bps_phases=bps_phases,
         n_symbols=2**n_log2,
         seed=int(seed),
+        n_spans=int(n_spans),
+        fec=fec,
     )
 
 
@@ -138,15 +207,28 @@ def _show_metrics(res: LinkResult) -> None:
         return
     evm0, evm1 = res.evm_percent
     ber = res.ber.ber
+    post = res.post_fec_ber
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("EVM X (%)", f"{evm0:.1f}")
     col2.metric("EVM Y (%)", f"{evm1:.1f}")
-    col3.metric("BER", f"{ber:.2e}")
-    col4.metric("Q-factor (dB)", f"{q_factor_from_ber(ber):.1f}")
+    if post is not None:
+        col3.metric("BER (post-FEC)", f"{post:.1e}")
+        col4.metric("Q-factor (dB)", f"{q_factor_from_ber(post):.1f}")
+        st.caption(
+            f"pre-FEC BER {ber:.2e} | {res.extra.get('fec', 'FEC')} | "
+            f"FOE: {res.extra['freq_offset_est_hz'] / 1e9:.3f} GHz | "
+            f"SNR: {evm_to_snr_db((evm0 + evm1) / 2):.1f} dB"
+        )
+    else:
+        col3.metric("BER", f"{ber:.2e}")
+        col4.metric("Q-factor (dB)", f"{q_factor_from_ber(ber):.1f}")
+        st.caption(
+            f"FOE: {res.extra['freq_offset_est_hz'] / 1e9:.3f} GHz | "
+            f"SNR: {evm_to_snr_db((evm0 + evm1) / 2):.1f} dB"
+        )
     st.caption(
-        f"Estimated FOE: {res.extra['freq_offset_est_hz'] / 1e9:.3f} GHz | "
-        f"SNR: {evm_to_snr_db((evm0 + evm1) / 2):.1f} dB | "
-        f"{c.modulation} @ {c.symbol_rate / 1e9:.0f} GBd, {c.length_km:.0f} km"
+        f"{c.modulation} @ {c.symbol_rate / 1e9:.0f} GBd, {c.length_km:.0f} km, "
+        f"{c.n_spans} span(s), launch {c.launch_power_dbm:.0f} dBm"
     )
 
 
@@ -194,11 +276,13 @@ def main() -> None:
     )
 
     cfg = _sidebar()
-    osnr_grid, ber_sweep, ber_theory = _waterfall_cached(
+    osnr_grid, ber_sweep, ber_theory, ber_sweep_post, ber_theory_post = _waterfall_cached(
         cfg.modulation,
         cfg.symbol_rate / 1e9,
         cfg.length_km,
         cfg.seed if cfg.seed is not None else 1234,
+        cfg.n_spans,
+        cfg.fec,
     )
 
     if st.sidebar.button("Run simulation", type="primary"):
@@ -222,8 +306,24 @@ def main() -> None:
 
     st.header("Waterfall (BER vs OSNR, theory vs simulation)")
     st.plotly_chart(
-        plot_waterfall(osnr_grid, ber_sweep, ber_theory),
+        plot_waterfall(
+            osnr_grid,
+            ber_sweep,
+            ber_theory,
+            ber_sim_post=ber_sweep_post if cfg.fec != "none" else None,
+            ber_theory_post=ber_theory_post if cfg.fec != "none" else None,
+        ),
         use_container_width=True,
+    )
+    st.caption(
+        "The AWGN curve is the ideal limit for the per-polarisation SNR "
+        "Es/N0 = OSNR · B_ref/Rs. The simulation always lands above it: laser "
+        "phase noise, ADC quantization, the blind equalizer's steady-state "
+        "residual and residual crosstalk cost a few dB, and at very low OSNR "
+        "the carrier-recovery stage itself fails, flattening the curve. "
+        "When FEC is enabled the green (post-FEC) curves show the coding-gain "
+        "waterfall drop: once the pre-FEC BER is inside the code's correction "
+        "capability the post-FEC BER collapses toward 1e-15."
     )
 
 

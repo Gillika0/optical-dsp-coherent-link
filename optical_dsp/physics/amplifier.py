@@ -43,7 +43,9 @@ class ErbiumAmplifier:
       figure via the Bose–Einstein factor.
     * **OSNR mode** — the amplifier gain restores the launch power and ASE
       is scaled so the received OSNR exactly equals ``target_osnr_db``
-      (referenced to a 0.1 nm resolution bandwidth).
+      (referenced to a 0.1 nm resolution bandwidth). With ``n_amplifiers``
+      periodic amplifiers (one per span) the ASE is split evenly between
+      them, so the end-of-link OSNR still hits the target.
 
     Attributes
     ----------
@@ -57,6 +59,9 @@ class ErbiumAmplifier:
         ASE carrier wavelength.
     ref_band_nm:
         OSNR reference bandwidth.
+    n_amplifiers:
+        Number of cascaded amplifiers sharing the total ASE budget (OSNR
+        mode). ``1`` keeps the classic single-amplifier behaviour.
     """
 
     gain_db: float = 20.0
@@ -64,6 +69,7 @@ class ErbiumAmplifier:
     target_osnr_db: float | None = None
     wavelength_nm: float = 1550.0
     ref_band_nm: float = 0.1
+    n_amplifiers: int = 1
     seed: int | None = 42
 
     def amplify(
@@ -83,7 +89,10 @@ class ErbiumAmplifier:
             # Total dual-pol signal power after the ideal gain.
             p_total = float(np.mean(np.abs(out_x) ** 2 + np.abs(out_y) ** 2))
             osnr_lin = db_to_linear(self.target_osnr_db)
-            per_pol_n0 = p_total / (2.0 * osnr_lin * ref_bw)  # [W/Hz]
+            # With ``n_amplifiers`` cascaded stages the ASE budget is split:
+            # each stage contributes n0 so that the *sum* still hits OSNR.
+            n_amp = max(1, int(self.n_amplifiers))
+            per_pol_n0 = p_total / (2.0 * n_amp * osnr_lin * ref_bw)  # [W/Hz] per stage
             var = max(per_pol_n0 * sample_rate, 0.0)  # variance per sample
         else:
             gain_lin = db_to_linear(self.gain_db)
@@ -109,16 +118,19 @@ def add_ase_to_osnr(
     sample_rate: float,
     wavelength_nm: float = 1550.0,
     ref_band_nm: float = 0.1,
+    n_amplifiers: int = 1,
     seed: int = 42,
 ) -> tuple[NDArray[np.complex128], NDArray[np.complex128]]:
     """Convenience: add white circular Gaussian noise to hit ``target_osnr_db``.
 
     The signal power is measured from the input fields; no gain is applied.
+    ``n_amplifiers`` splits the ASE budget as in ``ErbiumAmplifier``.
     """
     ref_bw = ref_bandwidth_hz(wavelength_nm * 1e-9, ref_band_nm)
     p_total = float(np.mean(np.abs(ex) ** 2 + np.abs(ey) ** 2))
     osnr_lin = db_to_linear(target_osnr_db)
-    per_pol_n0 = max(p_total / (2.0 * osnr_lin * ref_bw), 0.0)
+    n_amp = max(1, int(n_amplifiers))
+    per_pol_n0 = max(p_total / (2.0 * n_amp * osnr_lin * ref_bw), 0.0)
     var = per_pol_n0 * sample_rate
     if var <= 0.0:
         return ex.copy(), ey.copy()

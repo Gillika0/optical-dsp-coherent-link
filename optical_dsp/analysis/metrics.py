@@ -1,4 +1,4 @@
-"""Metrics: EVM, BER, Q-factor and theoretical AWGN references."""
+"""Metrics: EVM, BER, Q-factor, FEC and theoretical AWGN references."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 from scipy.special import erfc, erfcinv
+from scipy.stats import binom
 
 from ..utils import Constellation
 
@@ -161,6 +162,65 @@ def theoretical_ber_from_evm(evm_percent: float) -> float:
     """Estimate BER from RMS-EVM using the nearest-neighbour approximation."""
     snr_db = 20.0 * np.log10(max(100.0 / evm_percent, 1e-9))
     return theoretical_ber_qam(snr_db, 4)
+
+
+@dataclass(frozen=True)
+class FecCode:
+    """A bounded-distance hard-decision block code (Reed-Solomon over bytes).
+
+    ``n``/``k`` are the codeword/message lengths in 8-bit symbols; the code
+    corrects any pattern of up to ``t = (n - k) // 2`` symbol errors.
+    """
+
+    name: str
+    n: int
+    k: int
+
+    @property
+    def t(self) -> int:
+        """Correction capability in symbol errors."""
+        return (self.n - self.k) // 2
+
+    @property
+    def overhead(self) -> float:
+        """Relative redundancy ``(n - k) / k``."""
+        return (self.n - self.k) / self.k
+
+
+#: 7% hard-decision FEC, the classic submarine "HD-FEC" line code.
+HD_FEC_RS255_239: FecCode = FecCode("HD-FEC RS(255,239) 7%", 255, 239)
+
+#: ~20% strong hard-decision FEC (deep overhead, low pre-FEC BER threshold).
+STRONG_FEC_RS255_213: FecCode = FecCode("Strong FEC RS(255,213) 20%", 255, 213)
+
+_FEC_BITS = 8  # RS symbols are bytes
+
+
+def apply_fec(pre_fec_ber: float, code: FecCode, display_floor: float = 1e-15) -> float:
+    """Post-FEC BER after bounded-distance hard-decision RS decoding.
+
+    Independent bit errors with probability ``p`` give a byte-symbol error
+    probability :math:`p_s = 1 - (1-p)^8`. The decoder corrects up to ``t``
+    symbol errors per codeword; when a codeword fails, its ``j > t`` remaining
+    errors survive and each flips on average half of its 8 bits. The result is
+    floored at ``display_floor`` (in practice the code is error-free well
+    below its threshold, and no finite simulation can measure 1e-15).
+    """
+    p = float(pre_fec_ber)
+    if p <= 0.0:
+        return 0.0
+    if p >= 0.5:
+        return 0.5
+    psym = 1.0 - (1.0 - p) ** _FEC_BITS
+    n = int(code.n)
+    t = int(code.t)
+    if psym <= 0.0:
+        return display_floor
+    j = np.arange(t + 1, n + 1, dtype=np.float64)
+    pmf = binom.pmf(j, n, psym)
+    exp_remaining = float(np.dot(j, pmf))
+    post: float = 0.5 * exp_remaining / n
+    return float(max(min(post, 0.5), display_floor))
 
 
 def evm_to_snr_db(evm_percent: float) -> float:

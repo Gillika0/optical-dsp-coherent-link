@@ -57,3 +57,23 @@ def test_add_ase_to_osnr_noise_power() -> None:
     n0 = float(np.mean(np.abs(noise) ** 2)) / fs
     osnr = 10.0 * np.log10(p_total / (2.0 * n0 * ref_bw))
     assert np.isclose(osnr, 20.0, atol=0.5)
+
+
+def test_osnr_mode_splits_ase_over_amplifiers() -> None:
+    sps, n_symbols = 4, 2048
+    fs = 32e9 * sps
+    rng = np.random.default_rng(1)
+    sig = rng.normal(0.0, 0.1, n_symbols * sps) + 1j * rng.normal(0.0, 0.1, n_symbols * sps)
+    sig = sig.astype(np.complex128)
+
+    ref_bw = ref_bandwidth_hz(1550e-9, 0.1)
+    for n_amp in (1, 4, 8):
+        amp = ErbiumAmplifier(gain_db=16.0, target_osnr_db=20.0, n_amplifiers=n_amp, seed=3)
+        out_x, out_y = amp.amplify(sig, sig, fs)
+        # the per-stage ASE budget is n0/N, so a *single* stage only produces
+        # a fraction of the noise: the OSNR of the first stage is higher
+        p_total = float(np.mean(np.abs(out_x) ** 2 + np.abs(out_y) ** 2))
+        noise = out_x - sig * np.sqrt(db_to_linear(16.0))
+        n0_stage = float(np.mean(np.abs(noise) ** 2)) / fs
+        osnr_stage = 10.0 * np.log10(p_total / (2.0 * n0_stage * ref_bw))
+        assert np.isclose(osnr_stage, 20.0 + 10.0 * np.log10(n_amp), atol=0.5)

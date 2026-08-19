@@ -64,11 +64,16 @@ def ref_bandwidth_hz(wavelength_m: float, band_nm: float = 0.1) -> float:
     return C_LIGHT * band_nm * 1e-9 / (wavelength_m**2)
 
 
-def osnr_db_to_snr_db(osnr_db: float, symbol_rate: float, ref_bw_hz: float, npol: int = 2) -> float:
-    """Map a per-channel OSNR (ref. bandwidth) to per-polarisation
-    symbol SNR (Es/N0) in dB, dual-pol aware."""
-    osnr_lin = db_to_linear(osnr_db)
-    snr_lin = osnr_lin * ref_bw_hz / symbol_rate / npol
+def osnr_db_to_snr_db(osnr_db: float, symbol_rate: float, ref_bw_hz: float, npol: int = 1) -> float:
+    """Map OSNR to per-polarisation symbol SNR ``Es/N0`` in dB.
+
+    Consistent with ``ErbiumAmplifier``'s convention, which sets the per-pol
+    ASE density to ``n0 = Ps / (OSNR * B_ref)``: the per-pol symbol SNR at the
+    symbol rate is then ``Es/N0 = OSNR * B_ref / Rs`` (no extra factor).
+    ``npol`` only matters if the caller uses a *dual-polarisation-noise* OSNR
+    definition (SNR then loses ``10*log10(npol)``).
+    """
+    snr_lin = db_to_linear(osnr_db) * ref_bw_hz / symbol_rate / npol
     snr_db: float = 10.0 * float(np.log10(max(snr_lin, 1e-30)))
     return snr_db
 

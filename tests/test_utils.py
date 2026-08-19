@@ -14,6 +14,7 @@ from optical_dsp.utils import (
     dbm_to_w,
     get_constellation,
     linear_to_db,
+    osnr_db_to_snr_db,
     w_to_dbm,
 )
 
@@ -82,3 +83,14 @@ def test_mma_radii_qam16() -> None:
     const = QAM16()
     assert const.decision_radius2_i == pytest.approx(const.decision_radius2_q)
     assert const.cma_radius2 > const.decision_radius2_i
+
+
+def test_osnr_to_snr_matches_amplifier_convention() -> None:
+    # OSNR 20 dB, 32 GBd, 0.1 nm (12.5 GHz) ref. bandwidth:
+    # Es/N0 = OSNR + 10*log10(12.5/32) = 20 - 4.08 = 15.92 dB.
+    snr = osnr_db_to_snr_db(20.0, 32e9, 12.5e9)
+    assert np.isclose(snr, 20.0 + 10.0 * np.log10(12.5e9 / 32e9), atol=1e-9)
+    # a dual-pol-noise OSNR convention costs exactly 10*log10(npol)
+    assert np.isclose(
+        osnr_db_to_snr_db(20.0, 32e9, 12.5e9, npol=2), snr - 10.0 * np.log10(2.0), atol=1e-9
+    )

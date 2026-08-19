@@ -27,25 +27,36 @@ Pipeline summary (see `optical_dsp/pipeline.py`, `LinkConfig`/`run_link`):
    shared Wiener phase noise from the TX laser, PDM power split.
 2. **Fibre channel** — symmetric split-step Fourier method solving the coupled
    (Manakov) nonlinear Schrödinger equation, with an analytical linear-channel
-   reference for verification.
+   reference for verification. A link can be split into any number of spans
+   (`n_spans`): each span is propagated over `length_km / n_spans` and followed
+   by an EDFA that restores the launch power, so only the accumulated nonlinear
+   phase grows with the number of amplifiers while the end-of-link OSNR stays
+   fixed.
 3. **EDFA** — ideal-gain amplifier with additive Gaussian ASE calibrated to a
-   target OSNR referenced to 0.1 nm.
+   target OSNR referenced to 0.1 nm; with multiple spans the ASE budget is
+   split evenly across the amplifiers.
 4. **Receiver DSP** — 4th-power frequency-offset estimation/correction,
    chromatic-dispersion compensation (full-band CD filter), matched RRC filter
    with peak-energy retiming, a 2×2 T-spaced MIMO equalizer (constant-modulus
-   CMA for QPSK, or decision-directed LMS for higher-order QAM), and block-wise
-   blind phase search. Metrics are phase-ambiguity-resolved: per-polarisation
-   BER, rotation-normalised RMS-EVM, and the implied bit SNR/Q-factor.
+   CMA for QPSK, or a bounded CMA preamble + multi-modulus MMA for higher-order
+   QAM), and block-wise blind phase search. Metrics are phase-ambiguity-resolved:
+   per-polarisation BER, rotation-normalised RMS-EVM, and the implied bit
+   SNR/Q-factor.
+5. **FEC (optional)** — hard-decision Reed-Solomon models: the 7%-OH
+   RS(255,239) "HD-FEC" and the ~20%-OH RS(255,213) "strong" code. Post-FEC BER
+   is computed with a binomial bounded-distance-decoding model from the
+   simulated pre-FEC BER, so the dashboard shows the coding-gain waterfall drop
+   once the link operates inside the code's correction capability.
 
 ## Quick start
 
 ```bash
 pip install -e ".[dev]"
-pytest tests -q              # 60 tests: engine, DSP, metrics, end-to-end
+pytest tests -q              # 68 tests: engine, DSP, metrics, end-to-end
 ruff check .                 # lint
 mypy optical_dsp             # strict type check
 
-# dashboard (Streamlit + Plotly)
+# dashboard (Streamlit + Plotly), with a "Theory" companion page
 streamlit run app/main.py
 ```
 

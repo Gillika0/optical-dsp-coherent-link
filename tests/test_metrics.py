@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import numpy as np
 from optical_dsp.analysis.metrics import (
+    HD_FEC_RS255_239,
+    STRONG_FEC_RS255_213,
+    apply_fec,
     evm_rms,
     measure_ber,
     q_factor_from_ber,
@@ -77,3 +80,29 @@ def test_theoretical_ber_sanity() -> None:
     assert theoretical_ber_qam(30.0, 4) < theoretical_ber_qam(10.0, 4)
     assert 0.0 < theoretical_ber_qam(15.0, 16) < 0.5
     assert theoretical_ber_from_evm(1.0) < 1e-12
+
+
+def test_fec_codes_have_expected_capability() -> None:
+    assert HD_FEC_RS255_239.t == 8
+    assert np.isclose(HD_FEC_RS255_239.overhead, 16.0 / 239.0)
+    assert STRONG_FEC_RS255_213.t == 21
+    assert np.isclose(STRONG_FEC_RS255_213.overhead, 42.0 / 213.0, atol=1e-9)
+
+
+def test_post_fec_ber_drops_in_correctable_range() -> None:
+    # well inside the code capability: BER collapses toward the display floor
+    assert apply_fec(1e-4, HD_FEC_RS255_239) < 1e-10
+    assert apply_fec(1e-3, STRONG_FEC_RS255_213) < 1e-10
+    # the strong code handles an input the 7% code cannot
+    assert apply_fec(5e-3, STRONG_FEC_RS255_213) < apply_fec(5e-3, HD_FEC_RS255_239)
+
+
+def test_post_fec_ber_monotonic_and_bounded() -> None:
+    prev = -1.0
+    for p in (1e-5, 1e-4, 1e-3, 1e-2, 0.1, 0.4):
+        post = apply_fec(p, HD_FEC_RS255_239)
+        assert 0.0 <= post <= 0.5
+        assert post >= prev
+        prev = post
+    assert apply_fec(0.0, HD_FEC_RS255_239) == 0.0
+    assert apply_fec(0.5, HD_FEC_RS255_239) == 0.5

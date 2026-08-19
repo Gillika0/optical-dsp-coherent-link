@@ -123,28 +123,56 @@ def plot_waterfall(
     osnr_db: Sequence[float],
     ber_sim: Sequence[float],
     ber_theory: Sequence[float] | None = None,
+    ber_sim_post: Sequence[float] | None = None,
+    ber_theory_post: Sequence[float] | None = None,
+    post_label: str = "post-FEC",
 ) -> go.Figure:
-    """BER vs OSNR waterfall against the theoretical AWGN limit."""
+    """BER vs OSNR waterfall against the theoretical AWGN limit.
+
+    ``ber_*_post`` add post-FEC series (simulation and/or theory) so the
+    coding-gain waterfall drop is visible next to the raw curves.
+    """
     fig = go.Figure()
-    safe = [max(b, 1e-12) for b in ber_sim]
+    safe = [max(b, 1e-15) for b in ber_sim]
     fig.add_trace(
         go.Scatter(
             x=list(osnr_db),
             y=[np.log10(b) for b in safe],
             mode="markers+lines",
-            name="simulation",
+            name="simulation (pre-FEC)",
             marker={"size": 8, "color": "#1f77b4"},
             line={"color": "#1f77b4", "dash": "solid"},
         )
     )
+    if ber_sim_post is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=list(osnr_db),
+                y=[np.log10(max(b, 1e-15)) for b in ber_sim_post],
+                mode="markers+lines",
+                name=f"simulation ({post_label})",
+                marker={"size": 8, "color": "#2ca02c"},
+                line={"color": "#2ca02c", "dash": "solid"},
+            )
+        )
     if ber_theory is not None:
         fig.add_trace(
             go.Scatter(
                 x=list(osnr_db),
-                y=[np.log10(max(b, 1e-12)) for b in ber_theory],
+                y=[np.log10(max(b, 1e-15)) for b in ber_theory],
                 mode="lines",
-                name="AWGN theory",
+                name="AWGN theory (pre-FEC)",
                 line={"color": "red", "dash": "dash"},
+            )
+        )
+    if ber_theory_post is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=list(osnr_db),
+                y=[np.log10(max(b, 1e-15)) for b in ber_theory_post],
+                mode="lines",
+                name=f"AWGN theory ({post_label})",
+                line={"color": "#9467bd", "dash": "dashdot"},
             )
         )
     fig.update_layout(

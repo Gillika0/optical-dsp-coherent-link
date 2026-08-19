@@ -12,7 +12,15 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from .analysis.metrics import BerResult, evm_rms, measure_ber, resolve_rotation
+from .analysis.metrics import (
+    HD_FEC_RS255_239,
+    STRONG_FEC_RS255_213,
+    BerResult,
+    apply_fec,
+    evm_rms,
+    measure_ber,
+    resolve_rotation,
+)
 from .dsp.carrier_recovery import BlindPhaseSearch, FrequencyOffsetEstimator
 from .dsp.cdc import cd_compensate
 from .dsp.equalizer import MimoEqualizer
@@ -42,6 +50,10 @@ class LinkConfig:
     alpha_db_km: float = 0.2
     launch_power_dbm: float = 0.0
     enable_nonlinearity: bool = True
+    #: number of fibre spans, each followed by an EDFA that restores the
+    #: launch power (more spans = more accumulated nonlinear phase for the
+    #: same end-of-link OSNR, since the power is re-amplified more often)
+    n_spans: int = 1
 
     tx_linewidth_khz: float = 100.0
     lo_linewidth_khz: float = 100.0
@@ -50,6 +62,9 @@ class LinkConfig:
     fo_threshold_hz: float = 5e6  # only correct offsets above this (else noise spurs hurt)
     n_symbols: int = 2**14
     seed: int | None = 1234
+    #: forward error correction: ``"none"``, ``"hd"`` (7% RS(255,239)) or
+    #: ``"strong"`` (~20% RS(255,213)). Post-FEC BER is reported separately.
+    fec: str = "none"
 
     # receiver imperfections
     iq_gain_imbalance_db: float = 0.5
@@ -89,6 +104,8 @@ class LinkResult:
     equalizer_errors: list[float] = field(default_factory=list)
     evm_percent: tuple[float, float] = (0.0, 0.0)
     ber: BerResult | None = None
+    #: post-FEC bit error rate when ``config.fec != "none"`` (else ``None``)
+    post_fec_ber: float | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -127,14 +144,25 @@ def run_link(config: LinkConfig, quiet: bool = False) -> LinkResult:
     bx, by = t.bx, t.by
 
     channel = SsfmChannel(fibre, dz_km=0.5, manakov=True)
-    rx_x, rx_y = channel.propagate(ex, ey, config.length_km, fs)
 
-    amp = ErbiumAmplifier(
-        gain_db=config.alpha_db_km * config.length_km,
-        target_osnr_db=config.osnr_db,
-        seed=config.seed,
-    )
-    rx_x, rx_y = amp.amplify(rx_x, rx_y, fs)
+    # Cascaded spans: each span propagates through ``length_km / n_spans`` of
+    # fibre, then an EDFA restores the launch power. With a fixed end-of-link
+    # OSNR the per-stage ASE budget is split evenly, so the only thing that
+    # grows with ``n_spans`` is the accumulated nonlinear phase.
+    n_spans = max(1, int(config.n_spans))
+    span_km = config.length_km / n_spans
+    span_gain_db = config.alpha_db_km * span_km
+    base_seed = config.seed if config.seed is not None else 0
+    rx_x, rx_y = ex, ey
+    for i_span in range(n_spans):
+        rx_x, rx_y = channel.propagate(rx_x, rx_y, span_km, fs)
+        amp = ErbiumAmplifier(
+            gain_db=span_gain_db,
+            target_osnr_db=config.osnr_db,
+            n_amplifiers=n_spans,
+            seed=(base_seed + 1_000_003 * i_span) % (2**31 - 1),
+        )
+        rx_x, rx_y = amp.amplify(rx_x, rx_y, fs)
 
     lo = Laser(power_dbm=10.0, linewidth_khz=config.lo_linewidth_khz, seed=config.seed)
     fe = CoherentFrontend(
@@ -214,7 +242,7 @@ def run_link(config: LinkConfig, quiet: bool = False) -> LinkResult:
         fs=fs / config.sps,
         equalizer_errors=eqerr,
         evm_percent=(evm0, evm1),
-        extra={"freq_offset_est_hz": fo_est, "n_samples_eq": len(y_x)},
+        extra={"freq_offset_est_hz": fo_est, "n_samples_eq": len(y_x), "n_spans": n_spans},
     )
 
     # BER (the 2*pi/M phase ambiguity is per-polarisation, so resolve it on
@@ -228,4 +256,13 @@ def run_link(config: LinkConfig, quiet: bool = False) -> LinkResult:
         n_bits=ber_x.n_bits + ber_y.n_bits,
         best_rotation=ber_x.best_rotation,
     )
+
+    # Forward error correction: report the post-FEC BER alongside the raw one.
+    fec = config.fec.lower()
+    if fec not in ("none", "hd", "strong"):
+        raise ValueError(f"unknown FEC mode {config.fec!r}")
+    if fec != "none" and res.ber is not None:
+        code = HD_FEC_RS255_239 if fec == "hd" else STRONG_FEC_RS255_213
+        res.post_fec_ber = apply_fec(res.ber.ber, code)
+        res.extra["fec"] = code.name
     return res
