@@ -55,7 +55,7 @@ select = ["E", "F", "I", "UP", "B", "W"]
 ignore = ["B905"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 plugins = ["numpy.typing.mypy_plugin"]
 strict = true
 ignore_missing_imports = true
