@@ -95,3 +95,15 @@ def test_pipeline_rejects_unknown_fec() -> None:
 
     with pytest.raises(ValueError):
         run_link(LinkConfig(n_symbols=2**10, fec="turbo"))
+
+
+def test_pipeline_eye_fields_are_full_rate_and_stacked() -> None:
+    cfg = LinkConfig(modulation="16-QAM", n_symbols=2**12, length_km=40.0, seed=7)
+    r = run_link(cfg)
+    # both feeds must be at sps samples/symbol and hold both polarisations
+    assert r.eye_pre.shape[1] == 2 and r.eye_post.shape[1] == 2
+    assert r.eye_pre.shape[0] % cfg.sps == 0
+    assert r.eye_post.shape[0] % cfg.sps == 0
+    assert np.all(np.isfinite(r.eye_pre)) and np.all(np.isfinite(r.eye_post))
+    # post-DSP (CDC + matched filter) output differs from the raw ADC output
+    assert not np.allclose(r.eye_pre, r.eye_post)

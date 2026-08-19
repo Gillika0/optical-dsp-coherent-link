@@ -183,16 +183,26 @@ def plot_waterfall(
 
 
 def plot_convergence(err_history: Sequence[float], use_log: bool = True) -> go.Figure:
-    """Mean absolute adaptation-error vs symbol index (equalizer)."""
+    """Mean absolute adaptation-error vs symbol index (equalizer).
+
+    ``err_history`` holds one mean-|e| value per adaptation block (a few
+    tens of symbols), so the curve shows the CMA acquisition transient
+    followed by the MMA/DD steady state.
+    """
     fig = go.Figure()
+    y = list(err_history)
+    if use_log:
+        y = [max(float(v), 1e-12) for v in y]
+        y = [np.log10(v) for v in y]
     fig.add_trace(
         go.Scatter(
-            x=list(range(len(err_history))),
-            y=list(err_history),
+            x=list(range(len(y))),
+            y=y,
             mode="lines",
             name="adaptation error",
             line={"color": "#ff7f0e", "width": 1.5},
         )
     )
-    fig.update_layout(**_base_layout("Equalizer convergence", "Block index", "Mean |e|"))
+    ylabel = "log10(mean |e|)" if use_log else "mean |e|"
+    fig.update_layout(**_base_layout("Equalizer convergence", "Adaptation block", ylabel))
     return fig

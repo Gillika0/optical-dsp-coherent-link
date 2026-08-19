@@ -208,20 +208,21 @@ def _show_metrics(res: LinkResult) -> None:
     evm0, evm1 = res.evm_percent
     ber = res.ber.ber
     post = res.post_fec_ber
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("EVM X (%)", f"{evm0:.1f}")
     col2.metric("EVM Y (%)", f"{evm1:.1f}")
+    col3.metric("BER (pre-FEC)", f"{ber:.2e}")
     if post is not None:
-        col3.metric("BER (post-FEC)", f"{post:.1e}")
-        col4.metric("Q-factor (dB)", f"{q_factor_from_ber(post):.1f}")
+        col4.metric("BER (post-FEC)", f"{post:.1e}")
+        col5.metric("Q-factor (dB)", f"{q_factor_from_ber(post):.1f}")
         st.caption(
-            f"pre-FEC BER {ber:.2e} | {res.extra.get('fec', 'FEC')} | "
+            f"{res.extra.get('fec', 'FEC')} | "
             f"FOE: {res.extra['freq_offset_est_hz'] / 1e9:.3f} GHz | "
             f"SNR: {evm_to_snr_db((evm0 + evm1) / 2):.1f} dB"
         )
     else:
-        col3.metric("BER", f"{ber:.2e}")
-        col4.metric("Q-factor (dB)", f"{q_factor_from_ber(ber):.1f}")
+        col4.metric("FEC", "off")
+        col5.metric("Q-factor (dB)", f"{q_factor_from_ber(ber):.1f}")
         st.caption(
             f"FOE: {res.extra['freq_offset_est_hz'] / 1e9:.3f} GHz | "
             f"SNR: {evm_to_snr_db((evm0 + evm1) / 2):.1f} dB"
@@ -251,17 +252,33 @@ def _constellation_tabs(res: LinkResult) -> None:
 
 
 def _eye_psd_tabs(res: LinkResult) -> None:
-    st.header("Received signal")
-    tab_eye, tab_psd = st.tabs(["Eye diagram", "Power spectrum"])
-    sample_rate = res.config.symbol_rate * res.config.sps
-    with tab_eye:
-        st.plotly_chart(
-            plot_eye(res.rx_wide, res.config.sps, title="X-pol eye (post-CDC)"),
+    st.header("Eye diagrams (pre vs post DSP)")
+    tab_x, tab_y, tab_psd = st.tabs(["Polarisation X", "Polarisation Y", "Power spectrum"])
+    sps = res.config.sps
+    with tab_x:
+        c_pre, c_post = st.columns(2)
+        c_pre.plotly_chart(
+            plot_eye(res.eye_pre[:, 0], sps, title="Pre-DSP eye (ADC output)"),
+            use_container_width=True,
+        )
+        c_post.plotly_chart(
+            plot_eye(res.eye_post[:, 0], sps, title="Post-DSP eye (CDC + matched filter)"),
+            use_container_width=True,
+        )
+    with tab_y:
+        c_pre, c_post = st.columns(2)
+        c_pre.plotly_chart(
+            plot_eye(res.eye_pre[:, 1], sps, title="Pre-DSP eye (ADC output)"),
+            use_container_width=True,
+        )
+        c_post.plotly_chart(
+            plot_eye(res.eye_post[:, 1], sps, title="Post-DSP eye (CDC + matched filter)"),
             use_container_width=True,
         )
     with tab_psd:
+        sample_rate = res.config.symbol_rate * sps
         st.plotly_chart(
-            plot_psd(res.rx_wide, sample_rate, title="Received PSD"),
+            plot_psd(res.rx_wide, sample_rate, title="Received PSD (post-CDC)"),
             use_container_width=True,
         )
 

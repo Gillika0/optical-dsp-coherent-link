@@ -106,6 +106,7 @@ class MimoEqualizer:
         mu: float,
         start: int,
         err_history: list[float],
+        err_every: int = 64,
     ) -> NDArray[np.complex128]:
         """One adaptation pass over ``xall[start:start+n_iter]``.
 
@@ -113,6 +114,9 @@ class MimoEqualizer:
         ``"mma"`` (multi-modulus for square QAM) or ``"dd"`` (decision
         directed LMS, zero error at a converged solution on clean data).
 
+        The mean absolute error is appended to ``err_history`` every
+        ``err_every`` symbols (plus the final partial chunk), so the
+        dashboard's convergence curve has enough points to be visible.
         Returns the filtered outputs for the **whole** frame ``(N, 2)``.
         """
         n_total = xall.shape[0]
@@ -132,6 +136,7 @@ class MimoEqualizer:
         w = self.weights
         lk = self.leakage if mode == "dd" else 0.0
         err_acc = 0.0
+        count = 0
 
         for n in range(start, start + n_iter):
             x = xall[n]
@@ -149,13 +154,18 @@ class MimoEqualizer:
                 e0 = (r2_i - np.abs(y[0]) ** 2) * np.conj(y[0])
                 e1 = (r2_i - np.abs(y[1]) ** 2) * np.conj(y[1])
             err_acc += abs(e0) + abs(e1)
+            count += 1
             if lk > 0.0:
                 w *= 1.0 - lk
             w[:, 0] += mu * x * e0
             w[:, 1] += mu * x * e1
+            if count % err_every == 0:
+                err_history.append(err_acc / (2.0 * err_every))
+                err_acc = 0.0
 
-        if n_iter > 0:
-            err_history.append(err_acc / (2.0 * n_iter))
+        rem = count % err_every
+        if rem:
+            err_history.append(err_acc / (2.0 * rem))
 
         # Re-filter the *whole* frame with the final taps: the returned traces
         # must never contain the zero-padded regions of the adaptation window.

@@ -104,3 +104,30 @@ def test_equalizer_outputs_are_intrinsically_latency_shifted() -> None:
         np.vdot(y0[LAT:], y0[LAT:]).real * np.vdot(s0[: len(y0) - LAT], s0[: len(y0) - LAT]).real
     )
     assert corr > 0.99
+
+
+def test_convergence_history_has_many_points() -> None:
+    # The dashboard convergence curve must not be a 1-2 point stub: the
+    # adaptation error is recorded every ``err_every`` symbols.
+    rng = np.random.default_rng(0)
+    const = QPSK()
+    n = 4096
+    s0 = const.symbols[rng.integers(0, 4, n)]
+    s1 = const.symbols[rng.integers(0, 4, n)]
+    eq = MimoEqualizer(n_taps=15, seed=1)
+    _, _, errs = eq.equalize(s0, s1, const, n_cma=None)
+    assert len(errs) >= 32
+    # error must decay as the filter locks onto the clean signal
+    assert errs[0] > errs[-1]
+
+
+def test_convergence_history_for_qam_has_cma_and_mma_segments() -> None:
+    rng = np.random.default_rng(0)
+    const = QAM16()
+    n = 8192
+    s0 = const.symbols[rng.integers(0, 16, n)]
+    s1 = const.symbols[rng.integers(0, 16, n)]
+    eq = MimoEqualizer(n_taps=15, seed=1)
+    _, _, errs = eq.equalize(s0, s1, const, n_cma=1200)
+    assert len(errs) >= 64
+    assert errs[0] > errs[-1]

@@ -121,6 +121,24 @@ class CoherentFrontend:
         return r_x, r_y
 
 
+def matched_filter_full_rate(
+    sig: NDArray[np.complex128],
+    sps: int,
+    beta: float = 0.2,
+    n_taps_sym: int = 33,
+) -> NDArray[np.complex128]:
+    """Matched RRC filtering keeping the full ``sps`` samples/symbol rate.
+
+    Same filter as :func:`matched_filter_and_retime` but without the
+    downsampling, so the result can feed an eye diagram of the post-DSP
+    signal (after CDC + matched filter, before the T-spaced equalizer).
+    """
+    h = rrc_taps(beta, sps, n_taps_sym)
+    conv = np.convolve(sig, h, mode="full")
+    center = (len(h) - 1) // 2
+    return conv[center : center + len(sig)]
+
+
 def matched_filter_and_retime(
     sig: NDArray[np.complex128],
     sps: int,
@@ -133,10 +151,7 @@ def matched_filter_and_retime(
     ``selection`` chooses the sample offset within the ``sps`` grid:
     ``"peak"`` = index with maximum short-term power; ``0..sps-1`` fixed.
     """
-    h = rrc_taps(beta, sps, n_taps_sym)
-    conv = np.convolve(sig, h, mode="full")
-    center = (len(h) - 1) // 2
-    conv = conv[center : center + len(sig)]
+    conv = matched_filter_full_rate(sig, sps, beta, n_taps_sym)
 
     n_sym = len(sig) // sps
     if selection == "peak":

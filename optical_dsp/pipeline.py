@@ -24,7 +24,7 @@ from .analysis.metrics import (
 from .dsp.carrier_recovery import BlindPhaseSearch, FrequencyOffsetEstimator
 from .dsp.cdc import cd_compensate
 from .dsp.equalizer import MimoEqualizer
-from .dsp.front_end import CoherentFrontend, matched_filter_and_retime
+from .dsp.front_end import CoherentFrontend, matched_filter_and_retime, matched_filter_full_rate
 from .physics.amplifier import ErbiumAmplifier
 from .physics.channel import SsfmChannel
 from .physics.laser import Laser
@@ -100,6 +100,11 @@ class LinkResult:
     eq_in: NDArray[np.complex128]
     eq_out: NDArray[np.complex128]
     cr_out: NDArray[np.complex128]
+    #: eye-diagram feeds at ``sps`` samples/symbol, stacked (N, 2):
+    #: ``eye_pre`` is the raw ADC output (before any DSP block), ``eye_post``
+    #: is after CDC + matched filter (open eye, pre-equalizer).
+    eye_pre: NDArray[np.complex128]
+    eye_post: NDArray[np.complex128]
     fs: float
     equalizer_errors: list[float] = field(default_factory=list)
     evm_percent: tuple[float, float] = (0.0, 0.0)
@@ -174,6 +179,7 @@ def run_link(config: LinkConfig, quiet: bool = False) -> LinkResult:
         lo_freq_offset_hz=config.lo_freq_offset_ghz * 1e9,
     )
     r_x, r_y = fe.detect(rx_x, rx_y, fs)
+    eye_pre = np.stack([r_x, r_y], axis=-1)
 
     if config.run_cdc:
         r_x = cd_compensate(r_x, fs, fibre.beta2, config.length_km, config.alpha_db_km)
@@ -188,6 +194,14 @@ def run_link(config: LinkConfig, quiet: bool = False) -> LinkResult:
         corr_x, corr_y = foe.compensate(r_x, r_y, fo_est, fs)
         assert corr_y is not None
         r_x, r_y = corr_x, corr_y
+
+    eye_post = np.stack(
+        [
+            matched_filter_full_rate(r_x, config.sps, beta=config.roll_off),
+            matched_filter_full_rate(r_y, config.sps, beta=config.roll_off),
+        ],
+        axis=-1,
+    )
 
     e_x, _ = matched_filter_and_retime(r_x, config.sps, beta=config.roll_off)
     e_y, _ = matched_filter_and_retime(r_y, config.sps, beta=config.roll_off)
@@ -236,6 +250,8 @@ def run_link(config: LinkConfig, quiet: bool = False) -> LinkResult:
         rx_field=rx_x,
         rx_wide=r_x,
         rx_samples=e_x,
+        eye_pre=eye_pre,
+        eye_post=eye_post,
         eq_in=eq_in,
         eq_out=np.stack([y_x, y_y], axis=-1),
         cr_out=np.stack([z_x, z_y], axis=-1),
