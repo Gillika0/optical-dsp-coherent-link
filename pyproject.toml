@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "optical-dsp-coherent-link"
+version = "0.1.0"
+description = "End-to-end coherent optical link & DSP simulation engine (PDM-QPSK/QAM over NLSE fiber) with an interactive Streamlit dashboard."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Optical DSP Simulator Team" }]
+keywords = ["optical", "dsp", "coherent", "fiber", "nlse", "ssfm", "qam", "streamlit"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "plotly>=5.18",
+    "streamlit>=1.35",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+optical-dsp-demo = "app.main:main"
+
+[tool.setuptools.packages.find]
+include = ["optical_dsp*", "app*"]
+
+[tool.setuptools.package-data]
+"optical_dsp" = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --tb=short"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["optical_dsp", "app", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+ignore = ["B905"]
+
+[tool.mypy]
+python_version = "3.11"
+plugins = ["numpy.typing.mypy_plugin"]
+strict = true
+ignore_missing_imports = true
+exclude = [
+    "site-packages",
+    "app/",
+]
+# numpy __setitem__ overloads are notoriously noisy even with the plugin
+disable_error_code = ["index"]
+
+[tool.coverage.run]
+source = ["optical_dsp"]
+branch = true
