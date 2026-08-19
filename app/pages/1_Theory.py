@@ -144,6 +144,18 @@ def main() -> None:
         "factor of two is already inside $n_0$. This is the conversion used by "
         "the waterfall on the main page."
     )
+    _md(
+        "**Multi-span links.** A link of length $L$ can be split into "
+        "$N$ spans. Each span propagates over $L/N$ km and is followed by an "
+        "EDFA that restores the launch power, so the nonlinear phase "
+        "$\\phi_{\\mathrm{NL}}\\propto\\gamma P_0 L_{\\mathrm{eff}}$ accrues "
+        "span by span. In OSNR mode the ASE budget is divided evenly across "
+        "the amplifiers (each stage adds $n_0/N$), keeping the end-of-link "
+        "OSNR at its target. Sweeping $N$ at a fixed OSNR therefore isolates "
+        "the nonlinearity: the AWGN floor stays put while the Kerr penalty "
+        "grows - the effect the dashboard's *Fibre spans/amplifiers* slider "
+        "demonstrates."
+    )
 
     _h("5. Coherent receiver front-end")
     _md(
@@ -228,7 +240,34 @@ def main() -> None:
         "reported in dB."
     )
 
-    _h("9. Why is the simulated BER above the AWGN curve?")
+    _h("9. Forward error correction")
+    _md(
+        "FEC is modelled as a bounded-distance **hard-decision Reed-Solomon "
+        "code over GF(256)**: each codeword of $n=255$ bytes carries $k$ "
+        "information bytes and corrects any pattern of up to "
+        "$t=(n-k)/2$ symbol errors. With pre-FEC bit-error probability $p$, a "
+        "byte is wrong with probability $p_s = 1-(1-p)^8$, and the number of "
+        "symbol errors per codeword is binomial$(n, p_s)$."
+    )
+    _math(
+        r"p_s = 1-(1-p)^8,\qquad"
+        r"X \sim \mathrm{Binomial}(n, p_s),\qquad"
+        r"P_{b,\mathrm{post}} = \frac{1}{2n}"
+        r"\sum_{j=t+1}^{n} j \binom{n}{j} p_s^j (1-p_s)^{n-j}"
+    )
+    _md(
+        "When a codeword contains $j>t$ errors the decoder fails and all $j$ "
+        "survive (each flips half its bits on average, hence the factor "
+        "$1/2$). Below the code's threshold this sum collapses: the dashboard "
+        "floors it at $10^{-15}$, which is what the green post-FEC waterfall "
+        "cliff shows. Two presets are exposed: **HD-FEC** RS(255,239) at 7% "
+        "overhead ($t=8$) and **Strong FEC** RS(255,213) at ~20% overhead "
+        "($t=21$). Because it is a *hard-decision* model, feeding it a BER far "
+        "above its threshold makes the post-FEC BER *worse* than the input - "
+        "the classic behaviour of an over-loaded RS decoder."
+    )
+
+    _h("10. Why is the simulated BER above the AWGN curve?")
     _md(
         "The theory line is the **ideal limit**: no laser noise, no ADC, no "
         "filtering penalty, no blind-estimation error - only additive white "
@@ -257,7 +296,7 @@ def main() -> None:
         "see that penalty: it is *supposed* to sit above the line."
     )
 
-    _h("10. Quick reference")
+    _h("11. Quick reference")
     _md(
         "| Block | Module | Default |\n"
         "|---|---|---|\n"
@@ -270,6 +309,7 @@ def main() -> None:
         "| CDC | ``dsp/cdc.py`` | frequency-domain inverse |\n"
         "| Equalizer | ``dsp/equalizer.py`` | 15 taps, CMA+MMA |\n"
         "| FOE / BPS | ``dsp/carrier_recovery.py`` | 4th-power, 32 phases×16 |\n"
+        "| FEC | ``analysis/metrics.py`` | RS(255,239)/RS(255,213), binomial |\n"
         "| Metrics | ``analysis/metrics.py`` | EVM, BER, Q, theory |\n"
         "| Orchestration | ``pipeline.py`` | ``LinkConfig`` + ``run_link`` |\n"
     )
