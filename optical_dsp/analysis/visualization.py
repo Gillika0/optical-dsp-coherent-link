@@ -65,12 +65,22 @@ def plot_eye(
     title: str = "Eye diagram",
     branches: Sequence[str] = ("I", "Q"),
     max_traces: int = 600,
+    normalize: bool = True,
 ) -> go.Figure:
-    """Overlaid 2-T eye diagram for the requested quadrature branches."""
+    """Overlaid 2-T eye diagram for the requested quadrature branches.
+
+    The signal is normalised to unit peak envelope so the eye fills the plot
+    regardless of the optical power arriving at the receiver (a µW-level ADC
+    output would otherwise render as a barely visible flat line).
+    """
     period = 2 * sps
     n = len(signal)
     frames = n // period * period
     eye = signal[:frames].reshape(-1, period)
+    if normalize and eye.size:
+        peak = float(np.percentile(np.abs(signal), 99.0))
+        if peak > 0.0:
+            eye = eye / peak
     t = np.arange(period) / sps
     fig = go.Figure()
     for branch in branches:
@@ -79,18 +89,23 @@ def plot_eye(
             stride = int(np.ceil(eye.shape[0] / max_traces))
             data = data[::stride]
         tt = np.tile(t, data.shape[0])
+        color = "#2ca02c" if branch == "I" else "#d62728"
         fig.add_trace(
             go.Scatter(
                 x=tt,
                 y=data.ravel(),
                 mode="lines",
-                line={"width": 0.4, "color": "#2ca02c" if branch == "I" else "#d62728"},
-                opacity=0.25,
+                line={"width": 0.7, "color": color},
+                opacity=0.3,
+                name=branch,
                 showlegend=False,
             )
         )
+    # guide lines at the nominal sampling instants (mid-symbol)
+    for x_pos in (0.5, 1.5):
+        fig.add_vline(x=x_pos, line_dash="dot", line_color=_PLOTLY_GREY, opacity=0.6)
     fig.add_hline(y=0.0, line_dash="dash", line_color=_PLOTLY_GREY, opacity=0.5)
-    fig.update_layout(**_base_layout(title, "Time / symbol periods", "Amplitude (a.u.)"))
+    fig.update_layout(**_base_layout(title, "Time / symbol periods", "Amplitude (normalised)"))
     return fig
 
 
@@ -178,6 +193,151 @@ def plot_waterfall(
     fig.update_layout(
         **_base_layout("BER vs OSNR (0.1 nm)", "OSNR (dB)", "log10(BER)"),
         xaxis={"range": [min(osnr_db) - 1.0, max(osnr_db) + 1.0]},
+    )
+    return fig
+
+
+def plot_link_profile(
+    length_km: float,
+    n_spans: int,
+    alpha_db_km: float,
+    launch_power_dbm: float,
+    gamma_per_w_km: float,
+    osnr_db: float,
+) -> go.Figure:
+    """Analytical signal/ASE/nonlinear-phase evolution along the link.
+
+    Shows the familiar EDFA power profile: the signal decays at ``alpha``
+    dB/km, an EDFA restores it to the launch power at every span boundary,
+    ASE accumulates stage by stage, and the Kerr phase integrates over the
+    accumulated effective length. The plot is computed from the link
+    parameters (no full SSFM run), so it updates instantly when the sidebar
+    sliders move.
+    """
+    n_spans = max(1, int(n_spans))
+    span_km = length_km / n_spans
+    alpha_km = alpha_db_km * np.log(10.0) / 10.0  # [1/km]
+    p0_w = 10.0 ** (launch_power_dbm / 10.0) / 1000.0  # [W]
+    osnr_lin = 10.0 ** (osnr_db / 10.0)
+    p_ase_stage_w = p0_w / (n_spans * osnr_lin)  # [W] per amplifier (both pols)
+
+    dz = max(0.05, length_km / 2000.0)
+    z = np.arange(0.0, length_km + dz, dz)
+    local = z % span_km
+    k = np.floor(z / span_km).astype(int)
+    p_dbm = launch_power_dbm - alpha_db_km * local
+    ase_w = np.maximum(k * p_ase_stage_w, 1e-18)
+    ase_dbm = 10.0 * np.log10(ase_w * 1000.0)
+    leff_span = (1.0 - np.exp(-alpha_km * span_km)) / alpha_km
+    leff_local = (1.0 - np.exp(-alpha_km * local)) / alpha_km
+    phi = gamma_per_w_km * p0_w * (k * leff_span + leff_local)
+
+    amp_z = [span_km * i for i in range(1, n_spans)]
+    amp_y = [launch_power_dbm] * len(amp_z)
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=z,
+            y=p_dbm,
+            mode="lines",
+            name="signal power (dBm)",
+            line={"color": "#1f77b4", "width": 2.0},
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=z,
+            y=ase_dbm,
+            mode="lines",
+            name="accumulated ASE (dBm)",
+            line={"color": "#d62728", "width": 1.5},
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=z,
+            y=phi,
+            mode="lines",
+            name="nonlinear phase (rad)",
+            yaxis="y2",
+            line={"color": "#9467bd", "width": 2.0, "dash": "dash"},
+        )
+    )
+    if amp_z:
+        fig.add_trace(
+            go.Scatter(
+                x=amp_z,
+                y=amp_y,
+                mode="markers",
+                name="EDFA",
+                marker={"size": 11, "color": "#2ca02c", "symbol": "triangle-up"},
+            )
+        )
+        for az in amp_z:
+            fig.add_vline(x=az, line_dash="dot", line_color="#999999", opacity=0.7)
+    fig.add_vline(x=length_km, line_dash="dash", line_color="#333333", opacity=0.8)
+    title = "Along the link: power, ASE and nonlinear phase"
+    fig.update_layout(
+        **_base_layout(title, "Distance (km)", "Power (dBm)"),
+        yaxis2={
+            "title": "Nonlinear phase (rad)",
+            "overlaying": "y",
+            "side": "right",
+            "showgrid": False,
+        },
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02},
+    )
+    return fig
+
+
+def plot_penalty_sweep(
+    launch_power_dbm: Sequence[float],
+    evm_percent: Sequence[float],
+    ber: Sequence[float],
+    current_power: float,
+) -> go.Figure:
+    """EVM and BER vs launch power at a fixed OSNR: the nonlinear-penalty curve.
+
+    At low launch power the link is OSNR-limited (flat, AWGN floor); as the
+    power rises the Kerr nonlinearity grows and the metrics degrade - the
+    classic launch-power penalty.
+    """
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=list(launch_power_dbm),
+            y=list(evm_percent),
+            mode="lines+markers",
+            name="EVM (%)",
+            line={"color": "#1f77b4", "width": 2.0},
+            marker={"size": 7},
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=list(launch_power_dbm),
+            y=[np.log10(max(float(b), 1e-12)) for b in ber],
+            mode="lines+markers",
+            name="log10(BER)",
+            yaxis="y2",
+            line={"color": "#ff7f0e", "width": 2.0},
+            marker={"size": 7},
+        )
+    )
+    fig.add_vline(
+        x=current_power,
+        line_dash="dot",
+        line_color="#333333",
+        opacity=0.8,
+        annotation_text=f"current: {current_power:.0f} dBm",
+        annotation_position="top right",
+    )
+    title = "Nonlinear penalty vs launch power (same OSNR)"
+    fig.update_layout(
+        _base_layout(title, "Launch power (dBm)", "EVM (%)"),
+        yaxis2={"title": "log10(BER)", "overlaying": "y", "side": "right", "showgrid": False},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02},
     )
     return fig
 

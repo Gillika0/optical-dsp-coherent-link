@@ -82,14 +82,21 @@ def resolve_rotation(
     return int(min(range(constellation.symmetry_order), key=lambda k: evms[k]))
 
 
-def q_factor_from_ber(ber: float) -> float:
+def q_factor_from_ber(ber: float, cap_db: float | None = None) -> float:
     """Q-factor (dB) derived from the BER via the inverse error tail.
 
     .. math:: Q = \\sqrt 2\\,\\mathrm{erfc}^{-1}(2\\,P_b)
+
+    ``cap_db`` clamps the result (useful for display: a zero-error run has no
+    finite Q, only a lower bound).
     """
-    if ber >= 0.5 or ber <= 0.0:
-        return 0.0 if ber >= 0.5 else 20.0 * np.log10(1e30)
-    return float(20.0 * np.log10(np.sqrt(2.0) * erfcinv(2.0 * ber)))
+    if ber >= 0.5:
+        return 0.0
+    if ber <= 0.0:
+        raw = 20.0 * np.log10(1e30)
+        return float(min(raw, cap_db) if cap_db is not None else raw)
+    raw = float(20.0 * np.log10(np.sqrt(2.0) * erfcinv(2.0 * ber)))
+    return float(min(raw, cap_db) if cap_db is not None else raw)
 
 
 @dataclass

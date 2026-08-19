@@ -26,6 +26,8 @@ from optical_dsp.analysis.visualization import (
     plot_constellation,
     plot_convergence,
     plot_eye,
+    plot_link_profile,
+    plot_penalty_sweep,
     plot_psd,
     plot_waterfall,
 )
@@ -137,6 +139,41 @@ def _waterfall_cached(
     )
 
 
+@st.cache_data(show_spinner=False)
+def _launch_sweep_cached(
+    modulation: str,
+    symbol_rate_gbd: float,
+    length_km: float,
+    osnr_db: float,
+    seed: int,
+    n_spans: int,
+) -> tuple[list[float], list[float], list[float]]:
+    """Sweep the launch power at a fixed OSNR to expose the nonlinear penalty.
+
+    A lighter sweep (fewer symbols) since it only needs the trend, not a
+    precise BER.
+    """
+    powers = list(range(-8, 13, 4))  # -8, -4, 0, 4, 8, 12 dBm
+    evm: list[float] = []
+    ber: list[float] = []
+    for p_dbm in powers:
+        cfg = LinkConfig(
+            modulation=modulation,
+            symbol_rate=symbol_rate_gbd * 1e9,
+            length_km=length_km,
+            osnr_db=osnr_db,
+            launch_power_dbm=float(p_dbm),
+            seed=seed,
+            n_spans=n_spans,
+            n_symbols=2**11,
+            fec="none",
+        )
+        r = run_link(cfg, quiet=True)
+        evm.append(float(max(r.evm_percent)))
+        ber.append(r.ber.ber if r.ber is not None else 1.0)
+    return [float(p) for p in powers], evm, ber
+
+
 def _sidebar() -> LinkConfig:
     st.sidebar.title("Link configuration")
     modulation = st.sidebar.selectbox("Modulation", ["QPSK", "16-QAM", "64-QAM"], index=0)
@@ -208,13 +245,24 @@ def _show_metrics(res: LinkResult) -> None:
     evm0, evm1 = res.evm_percent
     ber = res.ber.ber
     post = res.post_fec_ber
+    n_bits = max(res.ber.n_bits, 1)
     col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("EVM X (%)", f"{evm0:.1f}")
     col2.metric("EVM Y (%)", f"{evm1:.1f}")
-    col3.metric("BER (pre-FEC)", f"{ber:.2e}")
+    if ber > 0.0:
+        col3.metric("BER (pre-FEC)", f"{ber:.2e}")
+        q_pre = q_factor_from_ber(ber, cap_db=30.0)
+    else:
+        col3.metric("BER (pre-FEC)", f"< {1 / n_bits:.1e}")
+        q_pre = q_factor_from_ber(1 / n_bits, cap_db=30.0)
     if post is not None:
-        col4.metric("BER (post-FEC)", f"{post:.1e}")
-        col5.metric("Q-factor (dB)", f"{q_factor_from_ber(post):.1f}")
+        if post <= 0.0:
+            col4.metric("BER (post-FEC)", "< 1e-15")
+            q_post = q_factor_from_ber(1e-15, cap_db=30.0)
+        else:
+            col4.metric("BER (post-FEC)", f"{post:.1e}")
+            q_post = q_factor_from_ber(post, cap_db=30.0)
+        col5.metric("Q-factor (dB)", f">{q_post:.0f} dB")
         st.caption(
             f"{res.extra.get('fec', 'FEC')} | "
             f"FOE: {res.extra['freq_offset_est_hz'] / 1e9:.3f} GHz | "
@@ -222,7 +270,7 @@ def _show_metrics(res: LinkResult) -> None:
         )
     else:
         col4.metric("FEC", "off")
-        col5.metric("Q-factor (dB)", f"{q_factor_from_ber(ber):.1f}")
+        col5.metric("Q-factor (dB)", f">{q_pre:.0f} dB")
         st.caption(
             f"FOE: {res.extra['freq_offset_est_hz'] / 1e9:.3f} GHz | "
             f"SNR: {evm_to_snr_db((evm0 + evm1) / 2):.1f} dB"
@@ -341,6 +389,46 @@ def main() -> None:
         "When FEC is enabled the green (post-FEC) curves show the coding-gain "
         "waterfall drop: once the pre-FEC BER is inside the code's correction "
         "capability the post-FEC BER collapses toward 1e-15."
+    )
+
+    st.header("Along the link (analytical)")
+    st.plotly_chart(
+        plot_link_profile(
+            length_km=cfg.length_km,
+            n_spans=cfg.n_spans,
+            alpha_db_km=cfg.alpha_db_km,
+            launch_power_dbm=cfg.launch_power_dbm,
+            gamma_per_w_km=1317.5,  # n2=2.6e-20, Aeff=80 um^2 @ 1550 nm
+            osnr_db=cfg.osnr_db,
+        ),
+        use_container_width=True,
+    )
+    st.caption(
+        "Analytical profile from the sidebar parameters: the signal decays at "
+        "0.2 dB/km and is restored to the launch power at every EDFA, the ASE "
+        "accumulates stage by stage (the end-of-link OSNR stays fixed because "
+        "the budget is split evenly), and the Kerr phase integrates over the "
+        "effective length - it grows with the number of spans."
+    )
+
+    st.header("Nonlinear penalty vs launch power")
+    sweep_powers, sweep_evm, sweep_ber = _launch_sweep_cached(
+        cfg.modulation,
+        cfg.symbol_rate / 1e9,
+        cfg.length_km,
+        cfg.osnr_db,
+        cfg.seed if cfg.seed is not None else 1234,
+        cfg.n_spans,
+    )
+    st.plotly_chart(
+        plot_penalty_sweep(sweep_powers, sweep_evm, sweep_ber, cfg.launch_power_dbm),
+        use_container_width=True,
+    )
+    st.caption(
+        "Same OSNR, seed and number of spans: at low launch power the link is "
+        "AWGN-limited (flat floor); as the power rises, self-phase and cross-"
+        "phase modulation distort the constellation and the metrics degrade. "
+        "The dashed line marks the launch power selected on the sidebar."
     )
 
 
