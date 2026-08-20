@@ -17,32 +17,39 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.signal import lfilter
+from scipy.signal import lfilter, resample_poly
 
+from .analysis.metrics import q_function
 from .utils import beta2_from_D, db_to_linear, dbm_to_w
 
 PAM_ORDERS: dict[str, int] = {"NRZ": 2, "PAM4": 4, "PAM8": 8}
 
 Q_ELECTRON: float = 1.602176634e-19  # [C]
-C_LIGHT: float = 299_792_458.0  # [m/s]
-WAVELENGTH_M: float = 1550.0e-9
 
 _SPLITTER_RATIOS: tuple[int, ...] = (1, 4, 16, 32, 64)
 
 
 @dataclass(frozen=True)
 class ImddConfig:
-    """Configuration of the IM/DD (short-reach / PON) link."""
+    """Configuration of the IM/DD (short-reach / PON) link.
+
+    Defaults follow a realistic O-band short-reach setup: PAM4 at
+    26.5625 GBd over 20 km of fibre with near-zero chromatic dispersion at
+    1310 nm. For C-band operation set ``wavelength_nm=1550`` and the SMF
+    dispersion (D ~ 16-17 ps/nm/km), or switch to NRZ at 10 GBd over
+    10-20 km.
+    """
 
     modulation: str = "PAM4"
-    symbol_rate: float = 25e9
+    symbol_rate: float = 26.5625e9
     sps: int = 8
-    laser_type: str = "DML"
+    laser_type: str = "EML"
     extinction_ratio_db: float = 8.0
-    chirp_alpha: float = 2.0
+    chirp_alpha: float = 0.0
     length_km: float = 20.0
     alpha_db_km: float = 0.2
-    dispersion_ps_per_nm_km: float = 17.0
+    wavelength_nm: float = 1310.0
+    dispersion_ps_per_nm_km: float = 0.0
     connector_loss_db: float = 1.0
     splitter_ratio: int = 1
     tx_power_dbm: float = 3.0
@@ -75,6 +82,9 @@ class ImddResult:
     rx_photo: NDArray[np.float64]
     rx_dsp: NDArray[np.float64]
     eye: NDArray[np.float64]
+    eye_eq: NDArray[np.float64]
+    dsp_ref: NDArray[np.float64]
+    dsp_eval_start: int
     fs: float
     ber: float
     n_errors: int
@@ -82,6 +92,7 @@ class ImddResult:
     rop_dbm: float
     budget: list[tuple[str, float | None, float]]
     eye_opening: dict[str, object]
+    eye_opening_eq: dict[str, object]
     equalizer_errors: list[float] = field(default_factory=list)
 
 
@@ -126,9 +137,10 @@ def link_budget(
     """Waterfall-style link budget ``(label, increment_db, cumulative_db)``.
 
     ``increment_db`` is ``None`` for absolute ("total") bars: transmitter
-    power, received power and the receiver sensitivity. The relative bars are
-    connector losses, fibre loss, splitter loss and the system margin (the
-    jump from ROP down to the sensitivity target).
+    launch power, received power (ROP) and receiver sensitivity. The relative
+    bars are the subtractive connector / fibre / splitter losses and the final
+    system margin (the jump from the sensitivity target back up to the ROP,
+    positive when the link closes with margin to spare).
     """
     splitter = 0.0 if config.splitter_ratio <= 1 else 10.0 * np.log10(config.splitter_ratio)
     fibre = config.alpha_db_km * config.length_km
@@ -137,13 +149,13 @@ def link_budget(
     after_conn = config.tx_power_dbm - config.connector_loss_db
     after_fibre = after_conn - fibre
     return [
-        ("Transmitter power", config.tx_power_dbm, config.tx_power_dbm),
+        ("Transmitter power", None, config.tx_power_dbm),
         ("Connector losses", -config.connector_loss_db, after_conn),
         ("Fibre loss", -fibre, after_fibre),
         ("Splitter loss", -splitter, rop),
         ("Received power (ROP)", None, rop),
-        ("System margin", sens - rop, sens),
         ("Receiver sensitivity", None, sens),
+        ("System margin", rop - sens, rop),
     ]
 
 
@@ -204,12 +216,21 @@ def _chirped_field(
 
 
 def _dispersion_filter(
-    signal: NDArray[np.complex128], fs: float, length_km: float, d_ps: float
+    signal: NDArray[np.complex128],
+    fs: float,
+    length_km: float,
+    d_ps: float,
+    wavelength_nm: float,
 ) -> NDArray[np.complex128]:
-    """Apply chromatic dispersion in the frequency domain (field level)."""
+    """Apply chromatic dispersion in the frequency domain (field level).
+
+    ``d_ps`` is the dispersion parameter in ps/(nm*km) at ``wavelength_nm``;
+    in the O-band at 1310 nm SMF has D ~ 0 ps/(nm*km), so the filter becomes
+    identity there.
+    """
     n = signal.size
     f = np.fft.fftfreq(n, d=1.0 / fs)
-    beta2 = beta2_from_D(WAVELENGTH_M, d_ps)
+    beta2 = beta2_from_D(wavelength_nm * 1e-9, d_ps)
     h = np.exp(1j * beta2 * (length_km * 1e3) * (2.0 * np.pi * f) ** 2 / 2.0)
     out: NDArray[np.complex128] = np.fft.ifft(np.fft.fft(signal) * h)
     return out
@@ -309,6 +330,111 @@ def _apply_dfe(
     return y, tf - 1
 
 
+def _apply_ffe_os(x: NDArray[np.float64], w: NDArray[np.float64], sps: int) -> NDArray[np.float64]:
+    """Apply a baud-spaced FFE to the *oversampled* signal.
+
+    The baud-trained taps are embedded on the symbol grid (zeros between
+    taps) so the filter output is well-defined at every sample: the
+    equalized waveform used to draw the post-FFE eye diagram. At the
+    sampling instants ``i = j*sps + off`` it reproduces exactly the
+    baud-rate output ``y[j]``.
+    """
+    taps = w.size
+    y = np.zeros_like(x)
+    for k in range(taps):
+        if w[k] != 0.0:
+            y[k * sps :] += w[k] * x[: len(x) - k * sps]
+    return y
+
+
+def _eye_opening_metrics(
+    samples: NDArray[np.float64],
+    d_ref: NDArray[np.float64],
+    levels: NDArray[np.float64],
+    m: int,
+    p0: float,
+) -> dict[str, object]:
+    """Eye-opening metrics from decision-instant samples, mean-normalised.
+
+    Levels are mean-normalised photocurrent so the rails sit at their average
+    optical-power spacing; the ideal adjacent-level spacing is the extinction-
+    ratio limited ``ideal_gap = (1-p0)/((m-1)*mean_p)``. ``eop_db`` is the
+    penalty between that ideal spacing and the minimum measured opening, capped
+    at 10 dB (IEEE-style display clamp: a fully closed eye reports 10.0 dB
+    rather than an unbounded number).
+    """
+    samp_norm: NDArray[np.float64] = samples / max(float(np.mean(samples)), 1e-30)
+    lvl = np.sort(levels)  # amplitude order for the eye openings
+    level_means: list[float] = []
+    for p in range(m):
+        sel = d_ref == lvl[p]
+        level_means.append(float(np.mean(samp_norm[sel])) if np.any(sel) else float(lvl[p]))
+    openings: list[float] = []
+    for p in range(m - 1):
+        lo, hi = level_means[p], level_means[p + 1]
+        sigma_lo = float(np.std(samp_norm[d_ref == lvl[p]])) if np.any(d_ref == lvl[p]) else 0.0
+        sigma_hi = (
+            float(np.std(samp_norm[d_ref == lvl[p + 1]])) if np.any(d_ref == lvl[p + 1]) else 0.0
+        )
+        openings.append(max(0.0, (hi - lo) - (sigma_lo + sigma_hi)))
+    mean_p = p0 + (1.0 - p0) * 0.5  # average optical power of the 0/1 waveform
+    ideal_gap = (1.0 - p0) / ((m - 1.0) * mean_p)  # level spacing / mean power
+    min_open = min(openings) if openings else 0.0
+    outer = [openings[0]] + ([openings[-1]] if len(openings) > 1 else [])
+    outer_mean = (sum(outer) / len(outer)) if outer else 0.0
+    eop_raw = 10.0 * np.log10(max(ideal_gap / max(min_open, 1e-12), 1.0))
+    eye_opening: dict[str, object] = {
+        "min_opening": min_open,
+        "ideal_opening": ideal_gap,
+        "eop_db": min(eop_raw, 10.0),
+        "eop_clamped": bool(eop_raw > 10.0),
+        "eye_linearity": float(min_open / outer_mean) if outer_mean > 0.0 else 0.0,
+        "levels": level_means,
+        "openings": openings,
+        "thresholds": [0.5 * (level_means[p] + level_means[p + 1]) for p in range(m - 1)],
+    }
+    if len(openings) >= 3:
+        eye_opening["middle_opening"] = openings[1]
+    return eye_opening
+
+
+def _gaussian_ber(
+    samples: NDArray[np.float64], d_ref: NDArray[np.float64], levels: NDArray[np.float64], bps: int
+) -> float:
+    """Gaussian noise-margin BER from decision-instant sample statistics.
+
+    Measures the per-level mean and noise sigma at the decision instant and
+    computes the error probability of each level against the midpoints of its
+    neighbours via the Gaussian tail. This removes the simulation's
+    ``1/n_bits`` error floor, so sensitivity curves drop cleanly below 1e-6 at
+    high received power. Assumes Gray ordering (adjacent-level errors cost one
+    bit) and that residual inter-symbol interference is small enough that the
+    per-level residual is approximately Gaussian.
+    """
+    lvl = np.sort(levels)
+    means: list[float] = []
+    sigmas: list[float] = []
+    for lv in lvl:
+        sel = d_ref == lv
+        if np.any(sel):
+            means.append(float(np.mean(samples[sel])))
+            sigmas.append(float(np.std(samples[sel])))
+        else:
+            means.append(float(lv))
+            sigmas.append(0.0)
+    ser = 0.0
+    for i in range(len(lvl)):
+        p_err = 0.0
+        if i > 0:
+            thr = 0.5 * (means[i - 1] + means[i])
+            p_err += float(q_function((means[i] - thr) / max(sigmas[i], 1e-30)))
+        if i < len(lvl) - 1:
+            thr = 0.5 * (means[i] + means[i + 1])
+            p_err += float(q_function((thr - means[i]) / max(sigmas[i], 1e-30)))
+        ser += p_err / len(lvl)
+    return float(min(ser / bps, 1.0))
+
+
 def run_imdd(config: ImddConfig, quiet: bool = False) -> ImddResult:
     """Run the IM/DD link simulation for :class:`ImddConfig`."""
     del quiet
@@ -332,7 +458,9 @@ def run_imdd(config: ImddConfig, quiet: bool = False) -> ImddResult:
 
     alpha = config.chirp_alpha if config.laser_type == "DML" else 0.0
     field = _chirped_field(p_wave, er_lin, alpha)
-    field_cd = _dispersion_filter(field, fs, config.length_km, config.dispersion_ps_per_nm_km)
+    field_cd = _dispersion_filter(
+        field, fs, config.length_km, config.dispersion_ps_per_nm_km, config.wavelength_nm
+    )
 
     rop_w = dbm_to_w(received_power_dbm(config))
     p_inst: NDArray[np.float64] = field_cd.real**2 + field_cd.imag**2
@@ -400,38 +528,18 @@ def run_imdd(config: ImddConfig, quiet: bool = False) -> ImddResult:
     n_err = int(np.count_nonzero(dec_bits != ref_bits)) if n_bits else 0
     ber = n_err / n_bits if n_bits else 1.0
 
-    # eye-opening metrics at the (pre-equalizer) sampling instant, in
-    # mean-normalised photocurrent units so levels sit at their optical power
-    samp_norm: NDArray[np.float64] = samp / max(float(np.mean(samp)), 1e-30)
-    lvl = np.sort(levels)  # amplitude order for the eye openings
-    openings: list[float] = []
-    level_means: list[float] = []
-    for p in range(m):
-        sel = d_ref == lvl[p]
-        level_means.append(float(np.mean(samp_norm[sel])) if np.any(sel) else float(lvl[p]))
-    for p in range(m - 1):
-        lo, hi = level_means[p], level_means[p + 1]
-        sigma_lo = float(np.std(samp_norm[d_ref == lvl[p]])) if np.any(d_ref == lvl[p]) else 0.0
-        sigma_hi = (
-            float(np.std(samp_norm[d_ref == lvl[p + 1]])) if np.any(d_ref == lvl[p + 1]) else 0.0
-        )
-        openings.append(max(0.0, (hi - lo) - (sigma_lo + sigma_hi)))
-    mean_p = p0 + (1.0 - p0) * 0.5  # average optical power of the 0/1 waveform
-    ideal_gap = (1.0 - p0) / ((m - 1.0) * mean_p)  # level spacing / mean power
-    min_open = min(openings) if openings else 0.0
-    outer = [openings[0]] + ([openings[-1]] if len(openings) > 1 else [])
-    outer_mean = (sum(outer) / len(outer)) if outer else 0.0
-    eye_opening: dict[str, object] = {
-        "min_opening": min_open,
-        "ideal_opening": ideal_gap,
-        "eop_db": 10.0 * np.log10(max(ideal_gap / max(min_open, 1e-12), 1.0)),
-        "eye_linearity": float(min_open / outer_mean) if outer_mean > 0.0 else 0.0,
-    }
-    eye_opening["levels"] = level_means
-    eye_opening["openings"] = openings
-    eye_opening["thresholds"] = [0.5 * (level_means[p] + level_means[p + 1]) for p in range(m - 1)]
-    if len(openings) >= 3:
-        eye_opening["middle_opening"] = openings[1]
+    # eye-opening metrics at the decision instant, in mean-normalised
+    # photocurrent units (so the rails sit at their optical-power spacing)
+    eye_opening = _eye_opening_metrics(samp, d_ref, levels, m, p0)
+    eye_opening_eq = _eye_opening_metrics(y, d_ref, levels, m, p0)
+
+    # oversampled equalized waveform for the post-DSP eye: the baud-trained
+    # FFE taps applied on the symbol grid (exact at the sampling instants), or
+    # a bandlimited interpolation of the baud-rate DFE / raw output.
+    if eq == "FFE" and config.equalizer_taps > 1:
+        eye_eq = _apply_ffe_os(rx, w, config.sps)
+    else:
+        eye_eq = resample_poly(y, config.sps, 1)
 
     return ImddResult(
         config=config,
@@ -440,6 +548,9 @@ def run_imdd(config: ImddConfig, quiet: bool = False) -> ImddResult:
         rx_photo=rx,
         rx_dsp=y,
         eye=rx,
+        eye_eq=eye_eq,
+        dsp_ref=d_ref,
+        dsp_eval_start=eval_start,
         fs=fs,
         ber=ber,
         n_errors=n_err,
@@ -447,6 +558,7 @@ def run_imdd(config: ImddConfig, quiet: bool = False) -> ImddResult:
         rop_dbm=received_power_dbm(config),
         budget=link_budget(config),
         eye_opening=eye_opening,
+        eye_opening_eq=eye_opening_eq,
     )
 
 
@@ -461,12 +573,16 @@ def imdd_sensitivity(
     Returns ``(rop_grid, {receiver: ber_curve}, {receiver: crossing_rop_dbm})``.
     The sweep uses a back-to-back channel (zero-length fibre) so the curves
     isolate the PIN/APD receiver noise behaviour from chromatic dispersion;
-    the ROP is swept directly via the transmitter power.
+    the ROP is swept directly via the transmitter power. BER is estimated
+    from the equalized decision-instant statistics with the Gaussian
+    noise-margin model, so the curves fall cleanly below 1e-6 at high power
+    instead of flooring at the simulation's ``1/n_bits`` limit.
     """
     if rop_grid_dbm is None:
         rop_grid: NDArray[np.float64] = np.linspace(-32.0, 0.0, 13)
     else:
         rop_grid = np.asarray(list(rop_grid_dbm), dtype=np.float64)
+    levels, bps = _level_map(config.modulation)
     base = ImddConfig(
         modulation=config.modulation,
         symbol_rate=config.symbol_rate,
@@ -476,6 +592,7 @@ def imdd_sensitivity(
         chirp_alpha=config.chirp_alpha,
         length_km=0.0,
         alpha_db_km=config.alpha_db_km,
+        wavelength_nm=config.wavelength_nm,
         dispersion_ps_per_nm_km=config.dispersion_ps_per_nm_km,
         connector_loss_db=0.0,
         splitter_ratio=1,
@@ -500,7 +617,15 @@ def imdd_sensitivity(
             cfg = ImddConfig(
                 **{**base.__dict__, "tx_power_dbm": float(rop), "receiver_type": rx_type}
             )
-            ber_list.append(run_imdd(cfg, quiet=True).ber)
+            res = run_imdd(cfg, quiet=True)
+            ber_list.append(
+                _gaussian_ber(
+                    res.rx_dsp[res.dsp_eval_start :],
+                    res.dsp_ref[res.dsp_eval_start :],
+                    levels,
+                    bps,
+                )
+            )
         curves[rx_type] = np.asarray(ber_list, dtype=np.float64)
         crossing = np.nan
         for rop, b in zip(rop_grid, ber_list):

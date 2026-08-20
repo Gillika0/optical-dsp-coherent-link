@@ -122,10 +122,11 @@ def test_sensitivity_waterfall_curves() -> None:
 
 def test_link_budget_waterfall_bars() -> None:
     budget = [
-        ("Transmitter power", 3.0, 3.0),
+        ("Transmitter power", None, 3.0),
         ("Connector losses", -1.0, 2.0),
         ("Received power (ROP)", None, -2.0),
         ("Receiver sensitivity", None, -15.0),
+        ("System margin", 13.0, -2.0),
     ]
     fig = plot_link_budget_bar(budget)
     tr = fig.data[0]
@@ -135,5 +136,11 @@ def test_link_budget_waterfall_bars() -> None:
         "Connector losses",
         "Received power (ROP)",
         "Receiver sensitivity",
+        "System margin",
     ]
-    assert list(tr.measure) == ["total", "relative", "total", "total"]
+    assert list(tr.measure) == ["total", "relative", "total", "total", "relative"]
+    # total bars are drawn at their cumulative value, relative bars at their increment
+    assert list(tr.y) == [3.0, -1.0, -2.0, -15.0, 13.0]
+    # margin up = green, losses down = red
+    assert tr.increasing.marker.color == "#2ca02c"
+    assert tr.decreasing.marker.color == "#d62728"

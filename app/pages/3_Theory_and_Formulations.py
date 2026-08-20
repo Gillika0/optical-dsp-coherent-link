@@ -310,7 +310,98 @@ def main() -> None:
         "the classic behaviour of an over-loaded RS decoder."
     )
 
-    _h("10. Why is the simulated BER above the AWGN curve?")
+    _h("10. Direct detection (IM/DD) and PON")
+    _md(
+        "**Intensity modulation.** Short-reach links and PONs do not recover "
+        "the optical phase - the photodiode only sees the optical power. The "
+        "signal is a train of intensity levels: **NRZ** (2 levels), **PAM4** "
+        "(4 levels) and **PAM8** (8 levels), carrying $\\log_2 M$ bits per "
+        "symbol. After a (square-law) photodiode the photocurrent is "
+        "$i = R\\,P_\\mathrm{opt}$, so the decision variable is the mean-"
+        "normalised current and the *received eye* is drawn directly on that "
+        "current."
+    )
+    _md(
+        "**Laser chirp and extinction ratio.** The modulated laser is a "
+        "**DML** (distributed-feedback laser directly modulated, chirp "
+        "parameter $\\alpha\\approx 1\\text{–}6$) or an **EML** "
+        "(electro-absorption modulator, $\\alpha\\approx 0\\text{–}1$). "
+        "Chirp couples instantaneous frequency to the driving current, "
+        "broadening the spectrum; combined with chromatic dispersion it "
+        "distorts the waveform and closes the eye. The **extinction ratio** "
+        "$\\mathrm{ER} = P_\\mathrm{on}/P_\\mathrm{off}$ bounds the contrast "
+        "between the rails - a finite ER floors the low level above zero, "
+        "shifting the decision points and costing sensitivity."
+    )
+    _md(
+        "**Fibre and dispersion.** The link budget subtracts connector, "
+        "fibre and splitter losses from the launch power to find the "
+        "**received optical power** $\\mathrm{ROP}$:"
+    )
+    _math(
+        r"\mathrm{ROP}\,[\mathrm{dBm}] = P_{\mathrm{tx}} - L_{\mathrm{conn}}"
+        r" - \alpha L - 10\log_{10} N_{\mathrm{split}}"
+    )
+    _md(
+        "Chromatic dispersion $D$ spreads the intensity pulses, and the "
+        "interference between the two sidebands produces a **dispersion "
+        "penalty** that oscillates with distance (deep power fades at a "
+        "periodic null). This is why O-band (1310 nm, $D\\approx 0$) is the "
+        "standard for unamplified 25+ GBd IM/DD links, while C-band (1550 nm, "
+        "$D\\approx 17$ ps/nm/km) needs dispersion compensation or "
+        "equalisation beyond ~10 km."
+    )
+    _md(
+        "**Receivers.** A **PIN** photodiode adds thermal noise from the "
+        "transimpedance amplifier; an **APD** multiplies the photocurrent by "
+        "an avalanche gain $M$ *before* the thermal stage, so its sensitivity "
+        "is better - at the price of **excess noise** "
+        "$F_A(M) = k_A M + (1-k_A)(2-1/M)$ that multiplies the shot noise and "
+        "caps the useful gain. The post-detection electrical noise is:"
+    )
+    _math(
+        r"\sigma^2_{\mathrm{el}} = 2q\,(I_p + I_d)\,M^2 F_A(M)\,B_e"
+        r" + \frac{4 k_B T}{R_L}\,B_e"
+    )
+    _md(
+        "with $I_p = R\\,P_\\mathrm{opt}$ the primary photocurrent and $B_e$ "
+        "the (single-sided) receiver bandwidth. Because there is no local "
+        "oscillator, the receiver is **thermal-noise dominated** at the "
+        "sensitivity point (unlike coherent detection, which is shot-noise "
+        "limited): the BER falls linearly in optical power, which is why the "
+        "sensitivity waterfall is much shallower than the coherent one."
+    )
+    _md(
+        "**Equalization.** A baud-spaced **FFE** (feed-forward) or **DFE** "
+        "(decision-feedback) equalizer is trained on the received waveform and "
+        "reopens the eye after dispersion and bandwidth limiting. The "
+        "post-equalizer eye is drawn alongside the received eye on the "
+        "dashboard so the improvement is visible directly. The **EOP / "
+        "TDECQ** metric is the penalty (dB) between the ideal level spacing "
+        "and the measured minimum opening; it is clamped at 10.0 dB (IEEE "
+        "802.3 style) so a fully closed eye displays a capped value instead of "
+        "a huge number."
+    )
+    _md(
+        "**Sensitivity and link budget.** The receiver sensitivity is the "
+        "optical power at which the equalized link reaches the FEC threshold "
+        "BER ($10^{-3}$); the system margin is $\\mathrm{ROP} - "
+        "\\mathrm{sens}$, drawn green when positive. The classical sensitivity "
+        "reference assumes an ideal (noise-free, infinite-ER) receiver:"
+    )
+    _math(
+        r"\mathrm{sens}\,[\mathrm{dBm}] = 10\log_{10}\!\left("
+        r"\frac{\sigma_{\mathrm{th}}}{R\,M} \sqrt{2}\,\mathrm{erfc}^{-1}(2P_b)"
+        r"\cdot 10^3\right)\ \mathrm{mW}"
+    )
+    _md(
+        "The simulated waterfall (back-to-back, sweeping ROP directly) uses a "
+        "Gaussian noise-margin estimate on the equalized decision-instant "
+        "statistics, so it falls cleanly below $10^{-6}$ at high power rather "
+        "than flooring at the simulation's bit-count limit."
+    )
+
+    _h("11. Why is the simulated BER above the AWGN curve?")
     _md(
         "The theory line is the **ideal limit**: no laser noise, no ADC, no "
         "filtering penalty, no blind-estimation error - only additive white "
@@ -339,7 +430,7 @@ def main() -> None:
         "see that penalty: it is *supposed* to sit above the line."
     )
 
-    _h("11. Quick reference")
+    _h("12. Quick reference")
     _md(
         "| Block | Module | Default |\n"
         "|---|---|---|\n"

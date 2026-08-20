@@ -708,16 +708,18 @@ def plot_link_budget_bar(
     """Waterfall bar chart of the link budget stages.
 
     ``budget`` items are ``(label, increment_db, cumulative_db)`` where
-    ``increment_db is None`` marks an absolute ("total") bar: transmitter
-    power, received power and receiver sensitivity. Relative bars (connector,
-    fibre, splitter losses and system margin) chain onto the running total so
-    the waterfall lands on the sensitivity target.
+    ``increment_db is None`` marks an absolute ("total") bar drawn at its
+    cumulative value: transmitter launch power, received power (ROP) and
+    receiver sensitivity. Relative bars (connector, fibre, splitter losses)
+    chain onto the running total, and the final system-margin bar rises from
+    the sensitivity to the ROP (green when the margin is positive, red when
+    the link is over budget).
     """
     labels = [item[0] for item in budget]
     measures = [
         "total" if i == 0 or item[1] is None else "relative" for i, item in enumerate(budget)
     ]
-    values = [0.0 if item[1] is None else float(item[1]) for item in budget]
+    values = [float(item[2]) if item[1] is None else float(item[1]) for item in budget]
     fig = go.Figure(
         go.Waterfall(
             x=labels,

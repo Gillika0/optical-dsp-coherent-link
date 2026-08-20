@@ -2,8 +2,9 @@
 
 Intensity-modulation links (NRZ / PAM4 / PAM8) with DML/EML laser chirp and
 extinction ratio, fibre + splitter losses, PIN/APD receivers and baud-spaced
-FFE/DFE equalization. Shows multi-level eyes with EOP metrics, a BER-vs-ROP
-receiver-sensitivity waterfall and a full link-budget chart.
+FFE/DFE equalization. Shows pre- and post-equalizer multi-level eyes with
+clamped EOP/TDECQ metrics, a BER-vs-ROP receiver-sensitivity waterfall and a
+full link-budget chart.
 """
 
 from __future__ import annotations
@@ -21,6 +22,23 @@ from optical_dsp.imdd import ImddConfig, ImddResult, imdd_sensitivity, run_imdd
 warnings.filterwarnings("ignore")
 
 _RECEIVERS = ["PIN", "APD"]
+_PRESETS = {
+    "O-band PAM4 100G (26.56 GBd, 1310 nm)": {
+        "modulation": "PAM4",
+        "symbol_rate": 26.56,
+        "band": "O-band (1310 nm)",
+        "length": 20.0,
+        "laser": "EML",
+    },
+    "C-band 10G NRZ (10 GBd, 1550 nm, 20 km)": {
+        "modulation": "NRZ",
+        "symbol_rate": 10.0,
+        "band": "C-band (1550 nm)",
+        "length": 20.0,
+        "laser": "EML",
+    },
+}
+_BANDS = ["O-band (1310 nm)", "C-band (1550 nm)"]
 
 
 def _build_config(
@@ -32,6 +50,7 @@ def _build_config(
     chirp_alpha: float,
     length_km: float,
     alpha_db_km: float,
+    wavelength_nm: float,
     dispersion_ps: float,
     connector_loss_db: float,
     splitter_ratio: int,
@@ -53,6 +72,7 @@ def _build_config(
         chirp_alpha=chirp_alpha,
         length_km=length_km,
         alpha_db_km=alpha_db_km,
+        wavelength_nm=wavelength_nm,
         dispersion_ps_per_nm_km=dispersion_ps,
         connector_loss_db=connector_loss_db,
         splitter_ratio=splitter_ratio,
@@ -89,24 +109,66 @@ def _sensitivity_cached(
 
 def _sidebar() -> ImddConfig:
     st.sidebar.title("IM/DD link configuration")
-    modulation = st.sidebar.selectbox("Modulation", ["NRZ", "PAM4", "PAM8"], index=1)
-    symbol_rate = st.sidebar.slider("Symbol rate (GBd)", 5.0, 100.0, 25.0, step=5.0)
+    preset_key = st.sidebar.selectbox("Quick preset", ["Custom", *_PRESETS.keys()], index=1)
+    custom = preset_key == "Custom"
+    preset = _PRESETS.get(preset_key, {})
+
+    modulation = st.sidebar.selectbox(
+        "Modulation",
+        ["NRZ", "PAM4", "PAM8"],
+        index=["NRZ", "PAM4", "PAM8"].index(preset.get("modulation", "PAM4")),
+        disabled=not custom,
+    )
+    symbol_rate = st.sidebar.number_input(
+        "Symbol rate (GBd)",
+        min_value=1.0,
+        max_value=112.0,
+        value=float(preset.get("symbol_rate", 26.56)),
+        step=1.0,
+        disabled=not custom,
+    )
     sps = st.sidebar.selectbox("Samples per symbol", [4, 8, 16], index=1)
-    laser_type = st.sidebar.selectbox("Laser / modulator", ["DML", "EML"], index=1)
+    laser_type = st.sidebar.selectbox(
+        "Laser / modulator",
+        ["DML", "EML"],
+        index=["DML", "EML"].index(preset.get("laser", "EML")),
+        disabled=not custom,
+    )
     extinction_db = st.sidebar.slider("Extinction ratio (dB)", 3.0, 20.0, 8.0, step=1.0)
     chirp_alpha = st.sidebar.slider(
         "Chirp factor (alpha)",
         0.0,
         6.0,
-        2.0,
+        0.0,
         step=0.5,
         disabled=(laser_type == "EML"),
     )
     st.sidebar.markdown("---")
     st.sidebar.subheader("Channel")
-    length_km = st.sidebar.slider("Link length (km)", 0.0, 40.0, 10.0, step=1.0)
+    length_km = st.sidebar.slider(
+        "Link length (km)",
+        0.0,
+        40.0,
+        float(preset.get("length", 20.0)),
+        step=1.0,
+        disabled=not custom,
+    )
     alpha_db_km = st.sidebar.slider("Fibre loss (dB/km)", 0.0, 0.6, 0.2, step=0.05)
-    dispersion_ps = st.sidebar.slider("Dispersion (ps/nm/km)", 0.0, 17.0, 17.0, step=0.5)
+    band = st.sidebar.selectbox(
+        "Operating band",
+        _BANDS,
+        index=_BANDS.index(preset.get("band", "O-band (1310 nm)")),
+        disabled=not custom,
+    )
+    is_oband = band.startswith("O")
+    wavelength_nm = 1310.0 if is_oband else 1550.0
+    dispersion_ps = (
+        0.0 if is_oband else st.sidebar.slider("Dispersion (ps/nm/km)", 0.0, 17.0, 17.0, step=0.5)
+    )
+    st.sidebar.caption(
+        "O-band (1310 nm) SMF has near-zero chromatic dispersion (D ≈ 0), so "
+        "the C-band dispersion slider is bypassed there."
+    )
     connector_loss = st.sidebar.slider("Connector losses (dB)", 0.0, 3.0, 1.0, step=0.1)
     splitter_ratio = st.sidebar.select_slider(
         "Passive splitter ratio (PON)",
@@ -140,6 +202,7 @@ def _sidebar() -> ImddConfig:
         chirp_alpha=float(chirp_alpha),
         length_km=float(length_km),
         alpha_db_km=float(alpha_db_km),
+        wavelength_nm=float(wavelength_nm),
         dispersion_ps=float(dispersion_ps),
         connector_loss_db=float(connector_loss),
         splitter_ratio=int(splitter_ratio),
@@ -157,16 +220,18 @@ def _sidebar() -> ImddConfig:
 def _kpi_row(res: ImddResult) -> None:
     cfg = res.config
     eye = res.eye_opening
-    margin = res.budget[-2][2] - res.budget[-1][2]
+    margin = res.budget[-1][2] - res.budget[-2][2]  # ROP - sensitivity
+    eop = eye["eop_db"]
+    eop_txt = f"{eop:.2f} dB" + (" (clamped)" if eye.get("eop_clamped") else "")
     col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("Received power (ROP)", f"{res.rop_dbm:.2f} dBm")
     col2.metric("BER", f"{res.ber:.2e}")
     col3.metric("Errors / bits", f"{res.n_errors}/{res.n_bits}")
     col4.metric("Min. eye opening", f"{eye['min_opening']:.3f}")
-    col5.metric("EOP/TDECQ", f"{eye['eop_db']:.2f} dB")
+    col5.metric("EOP/TDECQ", eop_txt)
     st.caption(
-        f"{cfg.modulation} @ {cfg.symbol_rate / 1e9:.0f} GBd, "
-        f"{cfg.laser_type} (ER {cfg.extinction_ratio_db:.0f} dB), "
+        f"{cfg.modulation} @ {cfg.symbol_rate / 1e9:.2f} GBd at "
+        f"{cfg.wavelength_nm:.0f} nm, {cfg.laser_type} (ER {cfg.extinction_ratio_db:.0f} dB), "
         f"{cfg.length_km:.0f} km, splitter 1:{cfg.splitter_ratio}, "
         f"{cfg.receiver_type} receiver, {cfg.equalizer_type} "
         f"({cfg.equalizer_taps} taps) · link margin {margin:.1f} dB"
@@ -179,8 +244,8 @@ def main() -> None:
     st.title("Direct Detection & Short-Reach (PON)")
     st.caption(
         "Intensity-modulated links (NRZ / PAM4 / PAM8) with DML/EML chirp and "
-        "extinction ratio, chromatic dispersion, passive splitter losses and "
-        "PIN/APD receivers with baud-spaced FFE/DFE equalization."
+        "extinction ratio, fibre + splitter losses, PIN/APD receivers and "
+        "baud-spaced FFE/DFE equalization."
     )
 
     cfg = _sidebar()
@@ -200,22 +265,37 @@ def main() -> None:
 
     _kpi_row(res)
 
-    st.header("Received eye diagram (pre-equalizer)")
-    st.plotly_chart(
-        plot_imdd_eye(
-            res.eye,
-            cfg.sps,
-            thresholds=res.eye_opening["thresholds"],
-            eye_metrics=res.eye_opening,
-        ),
-        use_container_width=True,
-    )
+    st.header("Eye diagrams (pre- vs post-equalizer)")
+    col_pre, col_post = st.columns(2)
+    with col_pre:
+        st.plotly_chart(
+            plot_imdd_eye(
+                res.eye,
+                cfg.sps,
+                title="Received Eye (Pre-Equalizer)",
+                thresholds=res.eye_opening["thresholds"],
+                eye_metrics=res.eye_opening,
+            ),
+            use_container_width=True,
+        )
+    with col_post:
+        st.plotly_chart(
+            plot_imdd_eye(
+                res.eye_eq,
+                cfg.sps,
+                title=f"Equalized Eye (Post {cfg.equalizer_type})",
+                thresholds=res.eye_opening_eq["thresholds"],
+                eye_metrics=res.eye_opening_eq,
+            ),
+            use_container_width=True,
+        )
     st.caption(
-        "Photocurrent at the receiver, mean-normalised, sliced into 2-symbol "
-        "windows at the sampling instant. The dashed red lines are the "
-        "decision thresholds (midpoints between the measured rails); the eye "
-        "is multi-level for PAM-N. EOP/TDECQ is the penalty (dB) between the "
-        "ideal level spacing and the measured minimum opening."
+        "Photocurrent at the decision instant, mean-normalised, sliced into "
+        "2-symbol windows. The dashed red lines are the decision thresholds "
+        "(midpoints between the measured rails). The post-equalizer eye shows "
+        "what the FFE/DFE cleaned up: wider openings, tighter rails and a "
+        "lower EOP/TDECQ. EOP/TDECQ is capped at 10.0 dB (IEEE-style) so a "
+        "fully closed eye displays 10.0 dB rather than a huge number."
     )
 
     st.header("Receiver sensitivity (BER vs received power)")
@@ -231,22 +311,26 @@ def main() -> None:
         use_container_width=True,
     )
     st.caption(
-        "Back-to-back sweep (no fibre or splitter losses): the received power "
-        "is swept directly so the curves isolate the receiver noise. The APD's "
-        "internal gain multiplies the photocurrent before the (dominant) "
+        "Back-to-back sweep (no fibre or splitter losses) with the received "
+        "power swept directly, so the curves isolate the receiver noise. BER "
+        "is estimated from the equalized decision-instant statistics with a "
+        "Gaussian noise-margin model, so it falls cleanly below 1e-6 at high "
+        "power instead of flooring at the simulation's bit-count limit. The "
+        "APD's internal gain multiplies the photocurrent before the (dominant) "
         "thermal noise, so it crosses the target BER at a lower optical power "
-        "than the PIN - at the price of multiplied shot noise, which caps the "
-        "gain at very low powers."
+        "than the PIN - at the price of multiplied shot noise."
     )
 
     st.header("Link budget")
     st.plotly_chart(plot_link_budget_bar(res.budget), use_container_width=True)
     st.caption(
-        "Waterfall of the passive optical budget: transmitter power minus "
-        "connector, fibre and splitter losses gives the received power (ROP). "
-        "The system margin is the distance from the ROP to the receiver "
-        "sensitivity (the power at which the equalized link reaches BER 1e-3). "
-        "A positive margin means the link closes with margin to spare."
+        "Waterfall of the passive optical budget: the transmitter launch power "
+        "(bar 1) minus the connector, fibre and splitter losses (bars 2-4) "
+        "gives the received optical power ROP (bar 5). The receiver "
+        "sensitivity (bar 6) is the power at which the equalized link reaches "
+        "BER 1e-3, and the system margin (bar 7) is ROP - sensitivity - drawn "
+        "green when positive (the link closes with margin to spare) and red "
+        "when negative."
     )
 
 
