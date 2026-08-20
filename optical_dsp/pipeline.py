@@ -220,8 +220,10 @@ def run_link(config: LinkConfig, quiet: bool = False) -> LinkResult:
     y_x, y_y, eqerr = eq.equalize(e_x, e_y, const, n_cma=config.n_cma)
 
     bps = BlindPhaseSearch(const, n_phases=config.bps_phases, block_size=config.bps_block)
-    z_x = bps.run(y_x)
-    z_y = bps.run(y_y)
+    phase_x = bps.estimate(y_x)
+    z_x = bps.apply(y_x, phase_x)
+    phase_y = bps.estimate(y_y)
+    z_y = bps.apply(y_y, phase_y)
 
     # The T-spaced MIMO equalizer's acausal window introduces a fixed
     # ``c = (n_taps - 1) // 2`` symbol latency; drop it so that the
@@ -258,7 +260,13 @@ def run_link(config: LinkConfig, quiet: bool = False) -> LinkResult:
         fs=fs / config.sps,
         equalizer_errors=eqerr,
         evm_percent=(evm0, evm1),
-        extra={"freq_offset_est_hz": fo_est, "n_samples_eq": len(y_x), "n_spans": n_spans},
+        extra={
+            "freq_offset_est_hz": fo_est,
+            "n_samples_eq": len(y_x),
+            "n_spans": n_spans,
+            "bps_phase_deg": np.degrees(phase_x),
+            "bps_phase_idx": (np.arange(len(phase_x), dtype=np.float64) + 0.5) * config.bps_block,
+        },
     )
 
     # BER (the 2*pi/M phase ambiguity is per-polarisation, so resolve it on

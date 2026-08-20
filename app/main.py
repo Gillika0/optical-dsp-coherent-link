@@ -29,8 +29,9 @@ from optical_dsp.analysis.visualization import (
     plot_convergence,
     plot_eye,
     plot_link_profile,
+    plot_optical_spectrum,
     plot_penalty_sweep,
-    plot_psd,
+    plot_phase_tracking,
     plot_waterfall,
 )
 from optical_dsp.pipeline import LinkConfig, LinkResult, run_link
@@ -397,7 +398,7 @@ def _voltage_level_spec(res: LinkResult) -> None:
     )
 
 
-def _eye_psd_tabs(res: LinkResult) -> None:
+def _eye_tabs(res: LinkResult) -> None:
     st.header("Eye diagrams — verification (secondary)")
     st.caption(
         "The eye is the *result* of the voltage levels specified above: the "
@@ -405,8 +406,7 @@ def _eye_psd_tabs(res: LinkResult) -> None:
         "the zero decision threshold/bias, its vertical scale by the ADC "
         "full-scale setting, and flat tops would indicate clipping."
     )
-    st.header("Eye diagrams (pre vs post DSP)")
-    tab_x, tab_y, tab_psd = st.tabs(["Polarisation X", "Polarisation Y", "Power spectrum"])
+    tab_x, tab_y = st.tabs(["Polarisation X", "Polarisation Y"])
     sps = res.config.sps
     with tab_x:
         c_pre, c_post = st.columns(2)
@@ -426,12 +426,6 @@ def _eye_psd_tabs(res: LinkResult) -> None:
         )
         c_post.plotly_chart(
             plot_eye(res.eye_post[:, 1], sps, title="Post-DSP eye (CDC + matched filter)"),
-            use_container_width=True,
-        )
-    with tab_psd:
-        sample_rate = res.config.symbol_rate * sps
-        st.plotly_chart(
-            plot_psd(res.rx_wide, sample_rate, title="Received PSD (post-CDC)"),
             use_container_width=True,
         )
 
@@ -470,7 +464,39 @@ def main() -> None:
     _show_metrics(res)
     _constellation_tabs(res)
     _voltage_level_spec(res)
-    _eye_psd_tabs(res)
+    _eye_tabs(res)
+
+    st.header("Optical / electrical spectrum (PSD)")
+    fs_wide = res.fs * res.config.sps
+    st.plotly_chart(
+        plot_optical_spectrum(res.tx_field, res.rx_field, res.eye_post[:, 0], fs_wide),
+        use_container_width=True,
+    )
+    st.caption(
+        "Welch PSD in dBm/GHz vs frequency. The TX and RX curves are the "
+        "(baseband) optical spectra; the RX one sits above the TX one because "
+        "of the ASE noise added by the EDFA (its floor is set by the OSNR "
+        "slider). The green curve is the electrical spectrum after the "
+        "matched filter - the in-band signal the equalizer and carrier "
+        "recovery actually process."
+    )
+
+    st.header("Carrier phase recovery tracking (BPS)")
+    phase_deg = res.extra.get("bps_phase_deg")
+    phase_idx = res.extra.get("bps_phase_idx")
+    if phase_deg is not None and len(phase_deg):
+        st.plotly_chart(
+            plot_phase_tracking(phase_deg, phase_idx, res.config.symbol_rate),
+            use_container_width=True,
+        )
+        st.caption(
+            "Unwrapped BPS phase estimate vs symbol index: the wandering trace "
+            "is the laser phase-noise random walk, and the linear slope is the "
+            "residual frequency offset left after the FOE stage (reported in "
+            "the annotation)."
+        )
+    else:
+        st.info("Phase-tracking data not available for this run.")
 
     st.header("Equalizer adaptation error")
     const = get_constellation(cfg.modulation)

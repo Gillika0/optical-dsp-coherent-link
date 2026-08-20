@@ -30,14 +30,32 @@ def plot_constellation(
     ref_symbols: NDArray[np.complex128] | None = None,
     n_show: int = 8192,
 ) -> go.Figure:
-    """Scatter plot of received (recovered) symbols against the constellation."""
+    """Scatter plot of received (recovered) symbols against the constellation.
+
+    The received points are fitted to the reference scale (residual gain/phase
+    removed), the axes are forced to equal aspect ratio and the limits are
+    locked to a symmetric square around the constellation ring (default
+    [-2, 2] for QPSK/16-QAM) so the eye-like clustering is not squeezed into a
+    strip.
+    """
+    z = samples[:n_show]
+    if ref_symbols is not None and len(z):
+        n = min(len(z), len(ref_symbols))
+        z, ref = z[:n], ref_symbols[:n]
+        if np.vdot(z, z).real > 0.0:
+            beta = complex(np.vdot(ref, z) / np.vdot(z, z))
+            z = beta * z
+        radius = max(float(np.percentile(np.abs(z), 99.0)), float(np.percentile(np.abs(ref), 99.0)))
+    elif len(z):
+        radius = float(np.percentile(np.abs(z), 99.0))
+    else:
+        radius = 1.0
+    lim = max(2.0, 1.25 * radius)
     fig = go.Figure()
-    x = samples[:n_show].real
-    y = samples[:n_show].imag
     fig.add_trace(
         go.Scattergl(
-            x=x,
-            y=y,
+            x=z.real,
+            y=z.imag,
             mode="markers",
             marker={"size": 3, "color": "#1f77b4", "opacity": 0.35},
             name="received",
@@ -54,7 +72,10 @@ def plot_constellation(
             )
         )
     fig.update_layout(
-        **_base_layout(title, "In-phase", "Quadrature"), xaxis={"scaleanchor": "y", "scaleratio": 1}
+        **_base_layout(title, "In-phase", "Quadrature"),
+        xaxis={"range": [-lim, lim], "scaleanchor": "y", "scaleratio": 1},
+        yaxis={"range": [-lim, lim]},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02},
     )
     return fig
 
@@ -192,6 +213,91 @@ def plot_psd(
     return fig
 
 
+def plot_optical_spectrum(
+    tx_field: NDArray[np.complex128],
+    rx_field: NDArray[np.complex128],
+    post_filtered: NDArray[np.complex128],
+    sample_rate: float,
+    title: str = "Optical / electrical spectrum (PSD)",
+) -> go.Figure:
+    """Welch PSD in dBm/GHz of TX, RX(+ASE) and post-matched-filter signals.
+
+    ``tx_field`` / ``rx_field`` are the (baseband) optical fields launched and
+    received, ``post_filtered`` the electrical signal after the matched
+    filter; all must share ``sample_rate``. The received curve sits above the
+    TX curve where ASE noise has been added, and the post-filter curve is the
+    in-band electrical spectrum the DSP actually processes.
+    """
+    fig = go.Figure()
+    series = (
+        (tx_field, "TX (transmitted optical)", "#1f77b4"),
+        (rx_field, "RX (received optical + ASE)", "#d62728"),
+        (post_filtered, "post-matched filter (electrical)", "#2ca02c"),
+    )
+    for sig, name, color in series:
+        if len(sig) == 0:
+            continue
+        f, pxx = welch(sig, fs=sample_rate, nperseg=min(len(sig), 8192), return_onesided=False)
+        f = np.fft.fftshift(f)
+        pxx = np.fft.fftshift(pxx)
+        fig.add_trace(
+            go.Scatter(
+                x=f / 1e9,
+                y=10.0 * np.log10(np.maximum(pxx, 1e-30)) + 120.0,
+                mode="lines",
+                line={"color": color, "width": 1.2},
+                name=name,
+            )
+        )
+    fig.update_layout(
+        **_base_layout(title, "Frequency (GHz)", "PSD (dBm/GHz)"),
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02},
+    )
+    return fig
+
+
+def plot_phase_tracking(
+    phase_deg: NDArray[np.float64] | Sequence[float],
+    block_centers: NDArray[np.float64] | Sequence[float],
+    symbol_rate: float,
+    title: str = "Carrier phase recovery tracking (BPS)",
+) -> go.Figure:
+    """Unwrapped BPS phase estimate vs symbol index.
+
+    The trace shows the laser phase-noise random walk; any linear slope is a
+    residual frequency offset, reported in the annotation
+    (``slope = 360 deg/symbol`` = one full rotation per symbol = symbol rate).
+    """
+    x = np.asarray(block_centers, dtype=np.float64)
+    y = np.asarray(phase_deg, dtype=np.float64)
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=y,
+            mode="lines+markers",
+            line={"color": "#ff7f0e", "width": 1.2},
+            marker={"size": 3, "color": "#ff7f0e"},
+            name="BPS phase estimate",
+        )
+    )
+    fig.add_hline(y=0.0, line_dash="dash", line_color="#999999", opacity=0.5)
+    if len(x) >= 2:
+        slope = float(np.polyfit(x, y, 1)[0])  # deg/symbol
+        freq_mhz = slope / 360.0 * symbol_rate / 1e6
+        fig.add_annotation(
+            xref="paper",
+            yref="paper",
+            x=1.0,
+            y=1.05,
+            text=f"residual frequency offset ≈ {freq_mhz:+.1f} MHz",
+            showarrow=False,
+            font={"size": 12},
+        )
+    fig.update_layout(**_base_layout(title, "Symbol index", "Phase estimate (deg)"))
+    return fig
+
+
 def plot_waterfall(
     osnr_db: Sequence[float],
     ber_sim: Sequence[float],
@@ -265,12 +371,13 @@ def plot_link_profile(
 ) -> go.Figure:
     """Analytical signal/ASE/nonlinear-phase evolution along the link.
 
-    Shows the familiar EDFA power profile: the signal decays at ``alpha``
-    dB/km, an EDFA restores it to the launch power at every span boundary,
-    ASE accumulates stage by stage, and the Kerr phase integrates over the
-    accumulated effective length. The plot is computed from the link
-    parameters (no full SSFM run), so it updates instantly when the sidebar
-    sliders move.
+    Shows the realistic EDFA power profile: the signal power decays
+    exponentially at ``alpha`` dB/km (a straight ramp on the dBm axis), then a
+    discrete gain step at every span boundary restores it to the launch power
+    (a crisp vertical jump, drawn as a genuine step). ASE accumulates stage by
+    stage, and the Kerr phase integrates over the accumulated effective
+    length. The plot is computed from the link parameters (no full SSFM run),
+    so it updates instantly when the sidebar sliders move.
     """
     n_spans = max(1, int(n_spans))
     span_km = length_km / n_spans
@@ -280,14 +387,30 @@ def plot_link_profile(
     p_ase_stage_w = p0_w / (n_spans * osnr_lin)  # [W] per amplifier (both pols)
 
     dz = max(0.05, length_km / 2000.0)
-    z = np.arange(0.0, length_km + dz, dz)
-    local = z % span_km
+
+    # Signal power: per-span exponential decay with a vertical EDFA step at
+    # every boundary. Duplicate the boundary sample so the jump is a true
+    # discrete gain step (bottom of one span -> top of the next) and the
+    # sawtooth pattern is unmistakable.
+    z_seg, p_seg = [np.array([0.0])], [np.array([launch_power_dbm])]
+    for s in range(n_spans):
+        a = s * span_km
+        b = (s + 1) * span_km
+        ramp = np.arange(a + dz, b + dz, dz)
+        ramp = np.clip(ramp, None, b)
+        z_seg.append(np.concatenate([[a], ramp]))
+        decay = launch_power_dbm - alpha_db_km * (ramp - a)
+        p_seg.append(np.concatenate([[launch_power_dbm], decay]))
+    z = np.concatenate(z_seg)
+    p_dbm = np.concatenate(p_seg)
+
+    # Accumulated ASE staircase (constant within a span, steps up at each EDFA).
     k = np.floor(z / span_km).astype(int)
-    p_dbm = launch_power_dbm - alpha_db_km * local
     ase_w = np.maximum(k * p_ase_stage_w, 1e-18)
     ase_dbm = 10.0 * np.log10(ase_w * 1000.0)
+
     leff_span = (1.0 - np.exp(-alpha_km * span_km)) / alpha_km
-    leff_local = (1.0 - np.exp(-alpha_km * local)) / alpha_km
+    leff_local = (1.0 - np.exp(-alpha_km * (z % span_km))) / alpha_km
     phi = gamma_per_w_km * p0_w * (k * leff_span + leff_local)
 
     amp_z = [span_km * i for i in range(1, n_spans)]

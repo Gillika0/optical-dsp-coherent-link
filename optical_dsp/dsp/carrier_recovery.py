@@ -108,33 +108,45 @@ class BlindPhaseSearch:
         step = 2.0 * np.pi / self._m / self.n_phases
         return (np.arange(self.n_phases, dtype=np.float64) + 0.5) * step
 
-    def run(self, sym: NDArray[np.complex128]) -> NDArray[np.complex128]:
-        """Apply BPS to a symbol-spaced stream; returns the phase-corrected data.
+    def estimate(self, sym: NDArray[np.complex128]) -> NDArray[np.float64]:
+        """Per-block BPS phase estimate (unwrapped in the M-fold domain).
 
-        The output retains an arbitrary global rotation multiple of
-        ``2*pi/M`` (resolved downstream, e.g. in BER counting).
+        Returns one unwrapped phase per block, so the trace directly shows the
+        laser phase-noise random walk plus any residual frequency offset (a
+        linear ramp: ``slope = 2*pi*df*T_sym`` per symbol).
         """
         phases = self._test_phases()
         n = len(sym)
         if n == 0:
-            return sym.copy()
-
+            return np.zeros(0, dtype=np.float64)
         m = self._m
-        block_phase = np.zeros(((n + self.block_size - 1) // self.block_size,), dtype=np.float64)
+        n_blocks = (n + self.block_size - 1) // self.block_size
+        block_phase = np.zeros((n_blocks,), dtype=np.float64)
         for b, start in enumerate(range(0, n, self.block_size)):
             block = sym[start : start + self.block_size]
             rotated = block[:, None] * np.exp(-1j * phases)[None, :]  # (Nb, B)
             dist = np.abs(rotated[:, :, None] - self._sym[None, None, :]) ** 2  # (Nb,B,M)
             cost = dist.min(axis=2).mean(axis=0)  # (B,)
             block_phase[b] = phases[int(np.argmin(cost))]
-
-        # Unwrap in the M-fold domain (2*pi/M period) to stitch quadrants.
         phase_m = block_phase * m
         phase_m = np.unwrap(phase_m, period=2.0 * np.pi)
-        phase_unwrapped = phase_m / m
+        return phase_m / m
 
+    def apply(
+        self, sym: NDArray[np.complex128], phase_unwrapped: NDArray[np.float64]
+    ) -> NDArray[np.complex128]:
+        """De-rotate ``sym`` by the per-block phases from :meth:`estimate`."""
         out = sym.copy()
+        n = len(sym)
         for b, start in enumerate(range(0, n, self.block_size)):
             stop = min(start + self.block_size, n)
             out[start:stop] *= np.exp(-1j * phase_unwrapped[b])
         return out
+
+    def run(self, sym: NDArray[np.complex128]) -> NDArray[np.complex128]:
+        """Apply BPS to a symbol-spaced stream; returns the phase-corrected data.
+
+        The output retains an arbitrary global rotation multiple of
+        ``2*pi/M`` (resolved downstream, e.g. in BER counting).
+        """
+        return self.apply(sym, self.estimate(sym))
