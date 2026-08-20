@@ -61,7 +61,10 @@ class ImddConfig:
     thermal_noise_pa_sqrt_hz: float = 15.0e-12
     rx_bw_ghz: float = 20.0
     equalizer_type: str = "FFE"
-    equalizer_taps: int = 9
+    # 15 taps comfortably invert the ~20 GHz RX low-pass memory at 26.56 GBd;
+    # the 9-tap FFE leaves residual ISI that floors the sensitivity curve near
+    # 1e-7 even at high received power
+    equalizer_taps: int = 15
     n_symbols: int = 2**14
     seed: int = 1234
 

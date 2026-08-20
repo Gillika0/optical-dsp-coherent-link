@@ -97,8 +97,8 @@ def test_theoretical_ber_monotonic_each_order(order: int) -> None:
 
 
 def test_theoretical_ber_8qam_reference_value() -> None:
-    # rectangular 2x4 cross, Q(sqrt(Es/N0/3)) tail: at 15 dB -> ~4.86e-4
-    assert np.isclose(theoretical_ber_qam(15.0, 8), 4.86e-4, rtol=0.05)
+    # circular star 8-QAM union bound: at 15 dB -> ~5.2e-4
+    assert np.isclose(theoretical_ber_qam(15.0, 8), 5.2e-4, rtol=0.05)
 
 
 def test_kpi_helpers() -> None:

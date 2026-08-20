@@ -112,6 +112,9 @@ class Constellation:
     order: int
     name: str = "M-QAM"
     dims: tuple[int, int] | None = None
+    #: explicit unit-power symbol set (overrides the square/rectangular grid);
+    #: used for non-separable constellations such as star-8QAM
+    points: NDArray[np.complex128] | None = None
 
     sqrt_order: int = field(init=False)
     bits_per_symbol: int = field(init=False)
@@ -122,6 +125,8 @@ class Constellation:
     _pos_i: NDArray[np.int64] = field(init=False)
     _pos_q: NDArray[np.int64] = field(init=False)
     _scale: float = field(init=False)
+    #: whether I/Q decisions are separable (per-dimension PAM grids)
+    separable: bool = field(init=False, default=True)
 
     #: 1-D array of the ``order`` complex symbols, unit average power.
     symbols: NDArray[np.complex128] = field(init=False, compare=False)
@@ -131,6 +136,30 @@ class Constellation:
     _cache: ClassVar[dict[int, Constellation]] = {}
 
     def __post_init__(self) -> None:
+        if self.points is not None:
+            pts = np.asarray(self.points, dtype=np.complex128).reshape(-1)
+            assert pts.size == self.order, "points must have exactly `order` symbols"
+            scale = float(np.sqrt(np.mean(np.abs(pts) ** 2)))
+            pts = pts / scale
+            bps = int(round(np.log2(self.order)))
+            bitmap = np.zeros((self.order, bps), dtype=np.uint8)
+            for n in range(self.order):
+                bitmap[n] = np.unpackbits(np.array([n], dtype=np.uint8))[-bps:]
+            object.__setattr__(self, "dims", None)
+            object.__setattr__(self, "sqrt_order", 0)
+            object.__setattr__(self, "bits_per_symbol", bps)
+            object.__setattr__(self, "_levels_i", np.sort(np.unique(pts.real)))
+            object.__setattr__(self, "_levels_q", np.sort(np.unique(pts.imag)))
+            object.__setattr__(self, "_gray_i", np.arange(self.order, dtype=np.int64))
+            object.__setattr__(self, "_gray_q", np.arange(self.order, dtype=np.int64))
+            object.__setattr__(self, "_pos_i", np.zeros(self.order, np.int64))
+            object.__setattr__(self, "_pos_q", np.zeros(self.order, np.int64))
+            object.__setattr__(self, "_scale", scale)
+            object.__setattr__(self, "symbols", pts)
+            object.__setattr__(self, "bitmap", bitmap)
+            object.__setattr__(self, "separable", False)
+            return
+
         if self.dims is None:
             root = int(round(np.sqrt(self.order)))
             assert root * root == self.order, "only square QAM constellations"
@@ -206,6 +235,10 @@ class Constellation:
 
     def nearest_index(self, samples: NDArray[np.complex128]) -> NDArray[np.int64]:
         """Nearest constellation-point index for each received sample."""
+        if not self.separable:
+            dist = np.abs(samples[:, None] - self.symbols[None, :]) ** 2
+            idx: NDArray[np.int64] = np.argmin(dist, axis=1).astype(np.int64)
+            return idx
         i_pos, _ = self._demap_dim(samples.real, self._levels_i)
         q_pos, _ = self._demap_dim(samples.imag, self._levels_q)
         n_q = self.dims[1]
@@ -217,6 +250,10 @@ class Constellation:
         self, samples: NDArray[np.complex128]
     ) -> tuple[NDArray[np.int64], NDArray[np.float64]]:
         """Nearest (label, squared distance) before constellation scaling."""
+        if not self.separable:
+            dist = np.abs(samples[:, None] - self.symbols[None, :]) ** 2
+            idx = np.argmin(dist, axis=1).astype(np.int64)
+            return idx, dist[np.arange(len(samples)), idx]
         i_pos, d_i = self._demap_dim(samples.real, self._levels_i)
         q_pos, d_q = self._demap_dim(samples.imag, self._levels_q)
         n_q = self.dims[1]
@@ -230,11 +267,16 @@ class Constellation:
         """Rotational symmetry of the QAM lattice (rotations in 2*pi/k).
 
         Square M-QAM is invariant under quarter turns; the rectangular
-        cross-QAM (2 x 4) has no rotational symmetry, so only the identity
-        rotation is explored.
+        cross-QAM (2 x 4) and non-separable layouts only keep the identity
+        rotation unless a quarter turn maps the point set onto itself (as the
+        star-8QAM inner/outer rings do).
         """
-        if self.dims[0] == self.dims[1]:
+        if self.separable and self.dims[0] == self.dims[1]:
             return 4
+        if not self.separable:
+            rot90 = self.symbols * 1j
+            if np.allclose(np.sort_complex(self.symbols), np.sort_complex(rot90)):
+                return 4
         return 1
 
     @property
@@ -264,10 +306,28 @@ def QPSK() -> Constellation:
     return _make(4, "QPSK")
 
 
+def _star_8qam_points() -> NDArray[np.complex128]:
+    """Circular / star 8-QAM: 4 inner points at radius ``r1`` (diagonal) and
+    4 outer points at radius ``r2`` (axis-aligned), ``r2/r1 = (sqrt2+sqrt6)/2``
+    so the inner and inner-outer minimum distances are balanced; unit power.
+    Labels follow a partial Gray order around each ring (see ``QAM8``)."""
+    t = (np.sqrt(2.0) + np.sqrt(6.0)) / 2.0  # r2 / r1
+    r1 = float(np.sqrt(2.0 / (1.0 + t * t)))
+    r2 = r1 * t
+    d2r = np.pi / 180.0
+    ang: NDArray[np.complex128] = np.exp(1j * d2r * np.array([45.0, 135.0, 315.0, 225.0]))
+    # index == Gray label: 0,1,2,3 around the inner ring, 4,5,6,7 the outer
+    inner: NDArray[np.complex128] = r1 * ang
+    outer: NDArray[np.complex128] = r2 * np.exp(1j * d2r * np.array([0.0, 270.0, 90.0, 180.0]))
+    return np.concatenate([inner, outer]).astype(np.complex128)
+
+
 def QAM8() -> Constellation:
-    """8-QAM constellation (rectangular 2 x 4 cross), cached."""
+    """8-QAM constellation (circular/star: inner 4 + outer 4 rings), cached."""
     if 8 not in Constellation._cache:
-        Constellation._cache[8] = Constellation(order=8, name="8-QAM", dims=(2, 4))
+        Constellation._cache[8] = Constellation(
+            order=8, name="8-QAM (star)", points=_star_8qam_points()
+        )
     return Constellation._cache[8]
 
 

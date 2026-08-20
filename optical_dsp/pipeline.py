@@ -77,6 +77,8 @@ class LinkConfig:
     mu_cma: float = 1e-3
     mu_mma: float = 1e-4
     n_cma: int | None = 4000
+    #: training-preamble length (symbols) for the data-aided LS equalizer init
+    n_tr: int = 512
     bps_phases: int = 32
     bps_block: int = 16
 
@@ -217,7 +219,14 @@ def run_link(config: LinkConfig, quiet: bool = False) -> LinkResult:
         seed=config.seed,
     )
     eq_in = np.stack([e_x, e_y], axis=-1)
-    y_x, y_y, eqerr = eq.equalize(e_x, e_y, const, n_cma=config.n_cma)
+    y_x, y_y, eqerr = eq.equalize(
+        e_x,
+        e_y,
+        const,
+        n_cma=config.n_cma,
+        train_symbols=(sx, sy),
+        n_tr=config.n_tr,
+    )
 
     bps = BlindPhaseSearch(const, n_phases=config.bps_phases, block_size=config.bps_block)
     phase_x = bps.estimate(y_x)

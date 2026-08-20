@@ -173,6 +173,40 @@ class MimoEqualizer:
         return out
 
     # ------------------------------------------------------------------ #
+    def init_from_preamble(
+        self,
+        x0: NDArray[np.complex128],
+        x1: NDArray[np.complex128],
+        t0: NDArray[np.complex128],
+        t1: NDArray[np.complex128],
+        n_tr: int,
+    ) -> None:
+        """Set the taps by least-squares fit to a known training preamble.
+
+        Replaces the random centre-tap start-up with the exact LS inverse of
+        the residual MIMO channel.  On squared QAM this avoids the degenerate
+        basins that a blind CMA/MMA start-up can lock into (which is why
+        DP-64QAM previously collapsed to a few rings at ~100% EVM).  ``t0/t1``
+        are the TX symbols aligned sample-by-sample with ``x0/x1``.
+        """
+        xall = self._stacked_inputs(x0, x1)
+        n_tr = int(min(n_tr, len(t0), len(t1), xall.shape[0]))
+        if n_tr < self.n_taps:
+            raise ValueError("training preamble shorter than the filter length")
+        # The T-spaced FIR is acausal: tap ``k`` looks ``k`` samples ahead, so
+        # the centre-tap start-up produces a ``c``-symbol intrinsic latency
+        # (net delay ``c`` in ``y[i] vs symbol[i]``).  To keep the pipeline's
+        # ``eq_latency`` removal valid, the LS targets must carry that same
+        # convention (row ``i`` -> symbol ``i - c``); fitting a raw alignment
+        # here would otherwise shift the equalized trace by ``c`` symbols.
+        c = (self.n_taps - 1) // 2
+        hist = self.n_taps - 1
+        rows = np.arange(hist, hist + n_tr)
+        X = xall[rows]
+        Y = np.stack([t0[rows - c], t1[rows - c]], axis=1)
+        w = np.linalg.lstsq(X, Y, rcond=None)[0]
+        self.weights = w.astype(np.complex128)
+
     def run_cma(
         self,
         x0: NDArray[np.complex128],
@@ -231,6 +265,8 @@ class MimoEqualizer:
         n_mma: int = 1000,
         n_dd: int | None = None,
         mode: str = "auto",
+        train_symbols: tuple[NDArray[np.complex128], NDArray[np.complex128]] | None = None,
+        n_tr: int = 512,
     ) -> tuple[NDArray[np.complex128], NDArray[np.complex128], list[float]]:
         """Equalize a symbol-synchronised 2x2 stream.
 
@@ -239,14 +275,15 @@ class MimoEqualizer:
         gain/phase drift:
 
         * ``mode="auto"`` (default): QPSK -> whole-frame CMA (its error is
-          exactly zero at a constant-modulus solution, so it locks cleanly);
-          higher-order QAM -> a bounded CMA acquisition preamble (``n_cma``,
-          capped at ``cma_preamble`` symbols) followed by MMA for the rest of
-          the frame.  A pure DD start-up on squared QAM is fragile: wrong
-          decisions feed back into the taps and the filter can drift into a
-          degenerate basin (seed- and frame-length dependent).  The blind
-          CMA+MMA chain never exhibits that failure, at the small cost of a
-          slightly higher steady-state EVM.
+          exactly zero at a constant-modulus solution, so it locks cleanly).
+          Higher-order QAM -> when ``train_symbols`` are given (as the link
+          pipeline does), a short data-aided least-squares preamble init
+          followed by decision-directed LMS for the rest of the frame; blind
+          CMA/MMA on squared QAM is fragile because MMA has degenerate fixed
+          points that the start-up can fall into (DP-64QAM collapsed to a
+          few rings at ~100% EVM).  Without ``train_symbols`` it falls back
+          to the blind chain: a bounded CMA acquisition preamble (``n_cma``,
+          capped at ``cma_preamble`` symbols) followed by MMA.
         * ``mode="cma+mma"``: classical blind preamble - CMA for ``n_cma``,
           MMA for ``n_mma`` symbols, then DD to the end.
         """
@@ -260,6 +297,13 @@ class MimoEqualizer:
         if mode == "auto":
             if order == 4:
                 mode = "cma"
+            elif train_symbols is not None:
+                t0, t1 = train_symbols
+                self.init_from_preamble(x0, x1, t0, t1, n_tr)
+                self._adapt_block(xall, None, constellation, "dd", self.mu_mma, 0, self._errs)
+                out = xall @ self.weights.conj()
+                y0, y1 = out[:, 0].copy(), out[:, 1].copy()
+                return y0, y1, self._errs
             else:
                 self._adapt_block(
                     xall, cma_preamble, constellation, "cma", self.mu_cma, 0, self._errs

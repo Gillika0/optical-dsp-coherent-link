@@ -42,10 +42,14 @@ warnings.filterwarnings("ignore")
 
 _MODULATIONS = ["DP-QPSK", "DP-8QAM", "DP-16QAM", "DP-64QAM"]
 
+#: default operating OSNR (dB, 0.1 nm) per constellation order: lower-order
+#: formats tolerate more noise, higher-order QAM needs a cleaner channel.
+_DEFAULT_OSNR = {4: 18.0, 8: 20.0, 16: 22.0, 64: 28.0}
+
 _WATERFALL_GRIDS = {
     4: np.linspace(10.0, 18.0, 6),
-    8: np.linspace(13.0, 22.0, 6),
-    16: np.linspace(16.0, 26.0, 6),
+    8: np.linspace(12.0, 22.0, 6),
+    16: np.array([12.0, 14.0, 16.0, 18.0, 20.0, 22.0]),
     64: np.linspace(20.0, 30.0, 6),
 }
 
@@ -113,7 +117,7 @@ def _waterfall_cached(
     for osnr_db in osnr_grid:
         cfg = LinkConfig(
             modulation=modulation,
-            n_symbols=2**12,
+            n_symbols=2**13,
             length_km=length_km,
             osnr_db=float(osnr_db),
             seed=seed,
@@ -158,7 +162,7 @@ def _launch_sweep_cached(
     A lighter sweep (fewer symbols) since it only needs the trend, not a
     precise BER.
     """
-    powers = list(range(-8, 13, 4))  # -8, -4, 0, 4, 8, 12 dBm
+    powers = [-6.0, -4.0, -2.0, 0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0]
     evm: list[float] = []
     ber: list[float] = []
     for p_dbm in powers:
@@ -182,6 +186,16 @@ def _launch_sweep_cached(
 def _sidebar() -> tuple[LinkConfig, str]:
     st.sidebar.title("Link configuration")
     modulation = st.sidebar.selectbox("Modulation", _MODULATIONS, index=0)
+    order = get_constellation(modulation).order
+    default_osnr = _DEFAULT_OSNR[order]
+    # Follow the modulation's default OSNR while the user has not customised
+    # the slider (it still sits on the previous modulation's default).
+    prev_mod = st.session_state.get("prev_modulation")
+    if prev_mod is not None and prev_mod != modulation:
+        prev_order = get_constellation(prev_mod).order
+        if st.session_state.get("osnr_slider") == _DEFAULT_OSNR[prev_order]:
+            st.session_state.pop("osnr_slider", None)
+    st.session_state["prev_modulation"] = modulation
     symbol_rate = st.sidebar.number_input(
         "Symbol rate (GBd)", min_value=4.0, max_value=128.0, value=32.0, step=4.0
     )
@@ -192,7 +206,9 @@ def _sidebar() -> tuple[LinkConfig, str]:
         "spans accumulate more nonlinear phase for the same end OSNR."
     )
     launch_power_dbm = st.sidebar.slider("Launch power (dBm)", -10.0, 12.0, 0.0, step=1.0)
-    osnr_db = st.sidebar.slider("Target OSNR (dB, 0.1 nm)", 8.0, 40.0, 22.0, step=1.0)
+    osnr_db = st.sidebar.slider(
+        "Target OSNR (dB, 0.1 nm)", 8.0, 40.0, default_osnr, step=1.0, key="osnr_slider"
+    )
     tx_linewidth = st.sidebar.slider("TX linewidth (kHz)", 0.0, 2000.0, 100.0, step=10.0)
     lo_linewidth = st.sidebar.slider("LO linewidth (kHz)", 0.0, 2000.0, 100.0, step=10.0)
     lo_offset = st.sidebar.slider("LO frequency offset (GHz)", -1.0, 1.0, 0.0, step=0.05)
@@ -261,7 +277,7 @@ def _kpi_bar(cfg: LinkConfig, order: int) -> None:
     else:
         target = 3.8e-3  # HD-FEC pre-FEC threshold as the reference spec limit
         gain = None
-    req_osnr = required_osnr_db(rs, order, target, ref_bw, npol=2)
+    req_osnr = required_osnr_db(rs, order, target, ref_bw)
 
     col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("Raw line rate", f"{raw:.1f} Gbps")
@@ -446,18 +462,17 @@ def main() -> None:
         st.info("Phase-tracking data not available for this run.")
 
     st.header("Equalizer adaptation error")
-    cma_preamble = min(cfg.n_cma if cfg.n_cma is not None else 4000, 1200)
-    switch_at = int(np.ceil(cma_preamble / 64.0)) if const.order > 4 else None
+    switch_at = None
     st.plotly_chart(
         plot_convergence(res.equalizer_errors, switch_at=switch_at),
         use_container_width=True,
     )
     st.caption(
-        "Each point is the mean absolute adaptation error over 64 symbols. It "
-        "drops as the filter locks on, then settles on a steady-state floor set "
-        "by the residual noise (the same noise that appears as EVM). For "
-        "8/16/64-QAM the green dotted line marks the handover from the CMA "
-        "acquisition preamble to the MMA steady state."
+        "Each point is the mean absolute decision-directed adaptation error "
+        "over 64 symbols. The filter is initialised with a short least-squares "
+        "training preamble (512 symbols), so the error starts low and settles "
+        "on a steady-state floor set by the residual noise (the same noise "
+        "that appears as EVM)."
     )
 
     st.header("Waterfall (BER vs OSNR, theory vs simulation)")
@@ -473,13 +488,14 @@ def main() -> None:
     )
     st.caption(
         "The AWGN curve is the ideal limit for the per-polarisation SNR "
-        "Es/N0 = OSNR · B_ref/Rs. The simulation always lands above it: laser "
-        "phase noise, ADC quantization, the blind equalizer's steady-state "
-        "residual and residual crosstalk cost a few dB, and at very low OSNR "
-        "the carrier-recovery stage itself fails, flattening the curve. "
-        "When FEC is enabled the green (post-FEC) curves show the coding-gain "
-        "waterfall drop: once the pre-FEC BER is inside the code's correction "
-        "capability the post-FEC BER collapses toward 1e-15."
+        "Es/N0 = OSNR · B_ref/Rs (B_ref = 12.48 GHz at 0.1 nm). Every OSNR "
+        "point is simulated at its own ASE noise level, so the simulation "
+        "tracks the theoretical curve down toward the FEC threshold; the "
+        "small remaining gap comes from laser phase noise, ADC quantization "
+        "and the equalizer's steady-state residual. When FEC is enabled the "
+        "green (post-FEC) curves show the coding-gain waterfall drop: once the "
+        "pre-FEC BER is inside the code's correction capability the post-FEC "
+        "BER collapses toward 1e-15."
     )
 
     st.header("Along the link (analytical)")

@@ -17,17 +17,23 @@ from optical_dsp.analysis.visualization import (
     plot_link_budget_bar,
     plot_sensitivity_waterfall,
 )
-from optical_dsp.imdd import ImddConfig, ImddResult, imdd_sensitivity, run_imdd
+from optical_dsp.imdd import (
+    PAM_ORDERS,
+    ImddConfig,
+    ImddResult,
+    imdd_sensitivity,
+    run_imdd,
+)
 
 warnings.filterwarnings("ignore")
 
 _RECEIVERS = ["PIN", "APD"]
 _PRESETS = {
-    "O-band PAM4 100G (26.56 GBd, 1310 nm)": {
+    "O-band PAM4 100G (26.56 GBd, 1310 nm, 10 km)": {
         "modulation": "PAM4",
         "symbol_rate": 26.56,
         "band": "O-band (1310 nm)",
-        "length": 20.0,
+        "length": 10.0,
         "laser": "EML",
     },
     "C-band 10G NRZ (10 GBd, 1550 nm, 20 km)": {
@@ -39,6 +45,16 @@ _PRESETS = {
     },
 }
 _BANDS = ["O-band (1310 nm)", "C-band (1550 nm)"]
+
+
+def _cd_fading_warning(cfg: ImddConfig) -> bool:
+    """True when the current setup suffers C-band CD power fading.
+
+    Chromatic dispersion converts the IM field into PM, which the square-law
+    detector turns into a frequency-dependent power ripple; at high baud rate
+    and distance in the C-band this closes the eye. O-band (D ~ 0) is immune.
+    """
+    return cfg.wavelength_nm > 1450.0 and cfg.symbol_rate / 1e9 > 25.0 and cfg.length_km > 10.0
 
 
 def _build_config(
@@ -188,7 +204,7 @@ def _sidebar() -> ImddConfig:
     st.sidebar.subheader("DSP")
     equalizer_type = st.sidebar.selectbox("Equalizer", ["None", "FFE", "DFE"], index=1)
     eq_taps = st.sidebar.slider(
-        "Equalizer taps", 3, 31, 9, step=2, disabled=(equalizer_type == "None")
+        "Equalizer taps", 3, 31, 15, step=2, disabled=(equalizer_type == "None")
     )
     n_log2 = st.sidebar.slider("Symbols (2^n)", 10, 15, 13, step=1)
     seed = st.sidebar.number_input("Seed", value=1234, step=1)
@@ -266,6 +282,11 @@ def main() -> None:
     _kpi_row(res)
 
     st.header("Eye diagrams (pre- vs post-equalizer)")
+    if _cd_fading_warning(cfg):
+        st.warning(
+            "High CD power fading in C-band direct detection. Switch to "
+            "O-band (1310 nm) or reduce baud rate/distance to open eye."
+        )
     col_pre, col_post = st.columns(2)
     with col_pre:
         st.plotly_chart(
@@ -273,7 +294,7 @@ def main() -> None:
                 res.eye,
                 cfg.sps,
                 title="Received Eye (Pre-Equalizer)",
-                thresholds=res.eye_opening["thresholds"],
+                n_levels=PAM_ORDERS[cfg.modulation],
                 eye_metrics=res.eye_opening,
             ),
             use_container_width=True,
@@ -284,7 +305,7 @@ def main() -> None:
                 res.eye_eq,
                 cfg.sps,
                 title=f"Equalized Eye (Post {cfg.equalizer_type})",
-                thresholds=res.eye_opening_eq["thresholds"],
+                n_levels=PAM_ORDERS[cfg.modulation],
                 eye_metrics=res.eye_opening_eq,
             ),
             use_container_width=True,
@@ -292,9 +313,10 @@ def main() -> None:
     st.caption(
         "Photocurrent at the decision instant, mean-normalised, sliced into "
         "2-symbol windows. The dashed red lines are the decision thresholds "
-        "(midpoints between the measured rails). The post-equalizer eye shows "
-        "what the FFE/DFE cleaned up: wider openings, tighter rails and a "
-        "lower EOP/TDECQ. EOP/TDECQ is capped at 10.0 dB (IEEE-style) so a "
+        "computed dynamically as the midpoints between the 4 measured PAM "
+        "cluster amplitudes of the plotted signal. The post-equalizer eye "
+        "shows what the FFE/DFE cleaned up: wider openings, tighter rails and "
+        "a lower EOP/TDECQ. EOP/TDECQ is capped at 10.0 dB (IEEE-style) so a "
         "fully closed eye displays 10.0 dB rather than a huge number."
     )
 

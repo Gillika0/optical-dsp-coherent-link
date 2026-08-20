@@ -159,17 +159,22 @@ def theoretical_ber_qam(snr_db: float, order: int) -> float:
     .. math:: P_b \\approx \\frac{4}{\\log_2 M}\\Big(1-\\frac{1}{\\sqrt M}\\Big)
               Q\\!\\left(\\sqrt{\\frac{3 E_s/N_0}{M-1}}\\right)
 
-    The rectangular 8-QAM (2 x 4 cross) is a product of a 2-PAM and a 4-PAM;
-    both dimensions share the scaled level spacing ``d = 2/sqrt(6)`` so the
-    per-adjacent-level tail is ``Q(d sqrt(2 Es/N0)/2) = Q(sqrt(Es/N0/3))`` and
-    ``SER = Q + 1.5 Q - 1.5 Q^2``, ``P_b = SER / log2(8)``.
+    The circular star 8-QAM (4 inner diagonal + 4 outer axis-aligned points)
+    is sized with ``r2/r1 = (sqrt2 + sqrt6)/2`` so the inner-inner and
+    inner-outer nearest-neighbour distances are equal:
+    ``d_min = sqrt(2) * r1`` with ``r1 = sqrt(2/(1+(r2/r1)^2))``. The nearest
+    neighbour union bound gives ``SER ~= 12 Q(d_min/sqrt(2 N0))``
+    (12 nearest neighbours), ``P_b = SER / log2(8)``.
     """
     assert order in (4, 8, 16, 64, 256)
     m = float(order)
     es_no = 10.0 ** (snr_db / 10.0)
     if order == 8:
-        q = float(q_function(np.sqrt(es_no / 3.0)))
-        ser = q + 1.5 * q - 1.5 * q * q
+        t = (np.sqrt(2.0) + np.sqrt(6.0)) / 2.0
+        r1 = np.sqrt(2.0 / (1.0 + t * t))
+        dmin2 = 2.0 * r1 * r1
+        q = float(q_function(np.sqrt(es_no * dmin2 / 2.0)))
+        ser = 1.0 - (1.0 - q) ** 12  # complement form of the 12-neighbour bound
         p = ser / 3.0
     else:
         sqrt_m = np.sqrt(m)
@@ -377,12 +382,15 @@ def required_osnr_db(
     order: int,
     target_ber: float,
     ref_bw_hz: float,
-    npol: int = 2,
+    npol: int = 1,
 ) -> float:
     """OSNR (dB, in ``ref_bw_hz``) needed to reach ``target_ber`` on AWGN.
 
     Inverse of :func:`optical_dsp.utils.osnr_db_to_snr_db`: the per-pol symbol
-    SNR is ``Es/N0 = OSNR * B_ref / (Rs * npol)``.
+    SNR is ``Es/N0 = OSNR * B_ref / (Rs * npol)``. ``npol=1`` matches the
+    engine noise model (per-pol SNR = OSNR * B_ref / Rs); pass ``npol=2`` only
+    for OSNR budgets defined over the *total* dual-pol power against a per-pol
+    SNR target.
     """
     snr_db = _snr_for_ber(order, target_ber)
     osnr_lin = 10.0 ** (snr_db / 10.0) * symbol_rate * npol / ref_bw_hz

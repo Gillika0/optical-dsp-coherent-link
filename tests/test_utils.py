@@ -28,11 +28,19 @@ def test_unit_energy(factory) -> None:
 def test_8qam_geometry() -> None:
     const = QAM8()
     assert const.order == 8
-    assert const.dims == (2, 4)
-    assert const.symmetry_order == 1  # the 2x4 cross is not 90-degree invariant
-    # unit-power scale: I in {+-1/sqrt(6)}, Q in {+-1/sqrt(6), +-3/sqrt(6)}
-    assert np.allclose(np.unique(const.symbols.real), [-1.0, 1.0] / np.sqrt(6.0))
-    assert np.allclose(np.unique(const.symbols.imag), [-3.0, -1.0, 1.0, 3.0] / np.sqrt(6.0))
+    assert not const.separable  # star 8-QAM is not a rectangular lattice
+    assert const.dims is None
+    assert const.symmetry_order == 4  # inner/outer rings are 90-degree invariant
+    # unit-power star layout: r2/r1 = (sqrt2 + sqrt6)/2, r1 = sqrt(2/(1+t^2))
+    t = (np.sqrt(2.0) + np.sqrt(6.0)) / 2.0
+    r1 = np.sqrt(2.0 / (1.0 + t * t))
+    r2 = r1 * t
+    radii = np.sort(np.abs(const.symbols))
+    assert np.allclose(radii[:4], r1, atol=1e-9)
+    assert np.allclose(radii[4:], r2, atol=1e-9)
+    # inner ring sits on the diagonal, outer ring axis-aligned
+    assert np.allclose(np.abs(const.symbols.real)[:4], np.abs(const.symbols.imag)[:4], atol=1e-9)
+    assert np.allclose(np.min(np.abs(const.symbols.real)[4:]), 0.0, atol=1e-9)
 
 
 @pytest.mark.parametrize("factory", [QPSK, QAM8, QAM16, QAM64])

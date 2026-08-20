@@ -138,7 +138,7 @@ def test_link_budget_waterfall_bars() -> None:
         "Receiver sensitivity",
         "System margin",
     ]
-    assert list(tr.measure) == ["total", "relative", "total", "total", "relative"]
+    assert list(tr.measure) == ["relative", "relative", "total", "total", "relative"]
     # total bars are drawn at their cumulative value, relative bars at their increment
     assert list(tr.y) == [3.0, -1.0, -2.0, -15.0, 13.0]
     # margin up = green, losses down = red

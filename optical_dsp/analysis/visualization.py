@@ -62,7 +62,7 @@ def plot_constellation(
         )
     fig.update_layout(
         **_base_layout(title, "In-phase", "Quadrature"),
-        xaxis={"range": [-2, 2], "scaleanchor": "y", "scaleratio": 1},
+        xaxis={"range": [-2, 2], "scaleanchor": "x", "scaleratio": 1},
         yaxis={"range": [-2, 2]},
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.02},
     )
@@ -563,11 +563,33 @@ def plot_convergence(
     return fig
 
 
+def _cluster_means(
+    samples: NDArray[np.float64], n_clusters: int, n_iter: int = 50
+) -> NDArray[np.float64]:
+    """k-means centroids of the decision-instant samples (1-D, monotone init)."""
+    if n_clusters <= 1 or samples.size < n_clusters:
+        return np.asarray([], dtype=np.float64)
+    lo = float(np.min(samples))
+    hi = float(np.max(samples))
+    if not np.isfinite(hi - lo) or hi <= lo:
+        return np.linspace(lo, hi, n_clusters) if np.isfinite(lo) else np.zeros(n_clusters)
+    cents = np.linspace(lo, hi, n_clusters)
+    for _ in range(n_iter):
+        labels = np.argmin(np.abs(samples[:, None] - cents[None, :]), axis=1)
+        for c in range(n_clusters):
+            sel = labels == c
+            if sel.any():
+                cents[c] = float(samples[sel].mean())
+        cents = np.sort(cents)
+    return cents
+
+
 def plot_imdd_eye(
     signal: NDArray[np.float64],
     sps: int,
     title: str = "IM/DD eye diagram",
     thresholds: Sequence[float] | None = None,
+    n_levels: int | None = None,
     eye_metrics: dict[str, object] | None = None,
     max_traces: int = 4000,
     target_sps: int = 32,
@@ -577,9 +599,12 @@ def plot_imdd_eye(
 
     The photocurrent is mean-normalised so the PAM rails sit at their average
     optical-power levels; the sampling instant is the column of maximum
-    variance. Decision thresholds (midpoints between adjacent measured rails)
-    are drawn as dashed horizontal lines, and the EOP / eye-linearity metrics
-    are reported in the title when ``eye_metrics`` is supplied.
+    variance. Decision thresholds are drawn as dashed red lines: either the
+    explicit ``thresholds`` midpoints, or - when ``n_levels`` is given - the
+    midpoints of the ``n_levels`` cluster mean amplitudes of the plotted
+    signal's own decision column (so the lines always track the actual eye).
+    The EOP / eye-linearity metrics are reported in the title when
+    ``eye_metrics`` is supplied.
     """
     if sps < target_sps:
         up = int(np.ceil(target_sps / sps))
@@ -620,7 +645,16 @@ def plot_imdd_eye(
     fig.add_vline(x=1.0, line_dash="dot", line_color="#111111", opacity=0.7)
     fig.add_vline(x=0.5, line_dash="dot", line_color=_PLOTLY_GREY, opacity=0.45)
     fig.add_vline(x=1.5, line_dash="dot", line_color=_PLOTLY_GREY, opacity=0.45)
-    th_list = list(thresholds) if thresholds else []
+
+    # decision-instant samples of the *normalised* waveform the user actually
+    # sees, so the dashed guides sit exactly on the plotted clusters
+    grid_norm = norm[:n].reshape(-1, sps)
+    dec = grid_norm[:, off]
+    if n_levels is not None and n_levels >= 2:
+        cents = _cluster_means(dec, n_levels)
+        th_list = [0.5 * (cents[p] + cents[p + 1]) for p in range(len(cents) - 1)]
+    else:
+        th_list = list(thresholds) if thresholds else []
     ymax = 0.0
     for th in th_list:
         fig.add_hline(y=th, line_dash="dash", line_color="#d62728", opacity=0.8)
@@ -709,15 +743,18 @@ def plot_link_budget_bar(
 
     ``budget`` items are ``(label, increment_db, cumulative_db)`` where
     ``increment_db is None`` marks an absolute ("total") bar drawn at its
-    cumulative value: transmitter launch power, received power (ROP) and
-    receiver sensitivity. Relative bars (connector, fibre, splitter losses)
-    chain onto the running total, and the final system-margin bar rises from
-    the sensitivity to the ROP (green when the margin is positive, red when
-    the link is over budget).
+    cumulative value: received power (ROP) and receiver sensitivity. The
+    transmitter launch power (bar 1) is drawn as a relative bar rising from
+    the zero baseline, so it renders as a solid bar from 0 up to the launch
+    power. Relative bars (connector, fibre, splitter losses and the final
+    system margin) chain onto the running total, and the margin bar rises
+    from the sensitivity to the ROP (green when the margin is positive, red
+    when the link is over budget).
     """
     labels = [item[0] for item in budget]
     measures = [
-        "total" if i == 0 or item[1] is None else "relative" for i, item in enumerate(budget)
+        "relative" if i == 0 else ("total" if item[1] is None else "relative")
+        for i, item in enumerate(budget)
     ]
     values = [float(item[2]) if item[1] is None else float(item[1]) for item in budget]
     fig = go.Figure(
