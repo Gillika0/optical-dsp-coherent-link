@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from optical_dsp.analysis.metrics import (
     HD_FEC_RS255_239,
     STRONG_FEC_RS255_213,
     adc_target_metrics,
     apply_fec,
     evm_rms,
+    fec_coding_gain_db,
+    line_rate_gbps,
     measure_ber,
+    net_rate_gbps,
     q_factor_from_ber,
     q_function,
+    required_osnr_db,
+    resolve_fec,
     resolve_rotation,
+    spectral_efficiency_bits_s_hz,
     theoretical_ber_from_evm,
     theoretical_ber_qam,
 )
@@ -81,6 +88,49 @@ def test_theoretical_ber_sanity() -> None:
     assert theoretical_ber_qam(30.0, 4) < theoretical_ber_qam(10.0, 4)
     assert 0.0 < theoretical_ber_qam(15.0, 16) < 0.5
     assert theoretical_ber_from_evm(1.0) < 1e-12
+
+
+@pytest.mark.parametrize("order", [4, 8, 16, 64])
+def test_theoretical_ber_monotonic_each_order(order: int) -> None:
+    assert theoretical_ber_qam(28.0, order) < theoretical_ber_qam(10.0, order)
+    assert 0.0 <= theoretical_ber_qam(0.0, order) <= 0.5
+
+
+def test_theoretical_ber_8qam_reference_value() -> None:
+    # rectangular 2x4 cross, Q(sqrt(Es/N0/3)) tail: at 15 dB -> ~4.86e-4
+    assert np.isclose(theoretical_ber_qam(15.0, 8), 4.86e-4, rtol=0.05)
+
+
+def test_kpi_helpers() -> None:
+    # dual-pol 32 GBd: QPSK 128 Gb/s, 16-QAM 256 Gb/s; SE 4 / 8 bit/s/Hz
+    assert np.isclose(line_rate_gbps(32e9, 4), 128.0)
+    assert np.isclose(line_rate_gbps(32e9, 16), 256.0)
+    assert np.isclose(spectral_efficiency_bits_s_hz(4, npol=2), 4.0)
+    assert np.isclose(spectral_efficiency_bits_s_hz(16, npol=2), 8.0)
+    # HD-FEC 7%: net = raw * 239/255
+    assert np.isclose(net_rate_gbps(128.0, HD_FEC_RS255_239), 128.0 * 239 / 255)
+    assert np.isclose(net_rate_gbps(128.0, None), 128.0)
+
+
+def test_required_osnr_reference() -> None:
+    # QPSK 32 GBd, dual pol, HD-FEC threshold (3.8e-3) in 0.1 nm.
+    # QPSK needs Es/N0 ~ 8.5 dB at 3.8e-3; OSNR = SNR + 10log10(Rs*npol/B_ref).
+    osnr = required_osnr_db(32e9, 4, 3.8e-3, 12.5e9, npol=2)
+    expected = 8.50 + 10.0 * np.log10(32e9 * 2.0 / 12.5e9)
+    assert np.isclose(osnr, expected, atol=0.1)
+
+
+def test_fec_coding_gain_range() -> None:
+    hd = fec_coding_gain_db(4, HD_FEC_RS255_239)
+    strong = fec_coding_gain_db(4, STRONG_FEC_RS255_213)
+    assert 5.0 < hd < 7.0  # textbook HD-FEC gain ~5.8 dB at 1e-12
+    assert strong > hd + 1.0  # deeper code buys more gain
+
+
+def test_resolve_fec() -> None:
+    assert resolve_fec("none") is None
+    assert resolve_fec("hd") is HD_FEC_RS255_239
+    assert resolve_fec("strong") is STRONG_FEC_RS255_213
 
 
 def test_fec_codes_have_expected_capability() -> None:

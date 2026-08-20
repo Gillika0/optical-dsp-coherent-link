@@ -91,29 +91,37 @@ def _gray_seq(n: int) -> NDArray[np.int64]:
 
 @dataclass(frozen=True)
 class Constellation:
-    """A unit-energy Gray-coded square M-QAM constellation.
+    """A unit-energy Gray-coded M-QAM constellation (square or rectangular).
 
     Symbols are normalised so that ``E[|s|^2] == 1``. Bit labels use the
-    binary value n for a position whose index within each dimension is the
-    n-th Gray word, MSB-first across the symbol.
+    binary value ``n`` for a position whose index within each dimension is
+    the n-th Gray word, MSB-first across the symbol.
 
     Parameters
     ----------
     order:
-        Number of constellation points (4, 16, 64, ...).
+        Number of constellation points (4, 8, 16, 64, ...).
     name:
         Optional human-readable label.
+    dims:
+        Per-dimension level counts ``(n_i, n_q)``. ``None`` selects the square
+        ``(sqrt(order), sqrt(order))`` lattice; pass e.g. ``(2, 4)`` for the
+        rectangular 8-QAM cross.
     """
 
     order: int
     name: str = "M-QAM"
+    dims: tuple[int, int] | None = None
 
     sqrt_order: int = field(init=False)
     bits_per_symbol: int = field(init=False)
-    _levels: NDArray[np.float64] = field(init=False)
+    _levels_i: NDArray[np.float64] = field(init=False)
+    _levels_q: NDArray[np.float64] = field(init=False)
+    _gray_i: NDArray[np.int64] = field(init=False)
+    _gray_q: NDArray[np.int64] = field(init=False)
+    _pos_i: NDArray[np.int64] = field(init=False)
+    _pos_q: NDArray[np.int64] = field(init=False)
     _scale: float = field(init=False)
-    _gray: NDArray[np.int64] = field(init=False)
-    _pos: NDArray[np.int64] = field(init=False)
 
     #: 1-D array of the ``order`` complex symbols, unit average power.
     symbols: NDArray[np.complex128] = field(init=False, compare=False)
@@ -123,35 +131,45 @@ class Constellation:
     _cache: ClassVar[dict[int, Constellation]] = {}
 
     def __post_init__(self) -> None:
-        assert self.order >= 4 and self.order & (self.order - 1) == 0
-        root = int(round(np.sqrt(self.order)))
-        assert root * root == self.order, "only square QAM constellations"
-        sp = int(np.log2(root))  # bits per dimension
+        if self.dims is None:
+            root = int(round(np.sqrt(self.order)))
+            assert root * root == self.order, "only square QAM constellations"
+            dims = (root, root)
+        else:
+            dims = (int(self.dims[0]), int(self.dims[1]))
+            assert dims[0] * dims[1] == self.order, "dims product must equal order"
+        sp_i = int(np.log2(dims[0]))
+        sp_q = int(np.log2(dims[1]))
+        bps = sp_i + sp_q
 
-        levels = 2 * np.arange(root, dtype=np.float64) - (root - 1)  # -(√M-1) ... +(√M-1)
-        gray = _gray_seq(root)
-        pos = np.empty(root, np.int64)
-        pos[gray] = np.arange(root, dtype=np.int64)
-
-        avg_pwr = 2.0 * float(np.mean(levels**2))
-        scale = float(np.sqrt(avg_pwr))
-        levels = levels / scale
+        levels = [2.0 * np.arange(n_d, dtype=np.float64) - (n_d - 1.0) for n_d in dims]
+        grays = [_gray_seq(n_d) for n_d in dims]
+        poss = [np.empty(n_d, np.int64) for n_d in dims]
+        for d, g in enumerate(grays):
+            poss[d][g] = np.arange(dims[d], dtype=np.int64)
 
         symbols = np.zeros(self.order, dtype=np.complex128)
-        bitmap = np.zeros((self.order, 2 * sp), dtype=np.uint8)
+        bitmap = np.zeros((self.order, bps), dtype=np.uint8)
         for n in range(self.order):
-            i_label, q_label = n // root, n % root
-            p_i, p_q = int(pos[i_label]), int(pos[q_label])
-            symbols[n] = levels[p_i] + 1j * levels[p_q]
-            bits_bin = np.unpackbits(np.array([n], dtype=np.uint8))[-2 * sp :]
+            i_label, q_label = n // dims[1], n % dims[1]
+            p_i, p_q = int(poss[0][i_label]), int(poss[1][q_label])
+            symbols[n] = levels[0][p_i] + 1j * levels[1][p_q]
+            bits_bin = np.unpackbits(np.array([n], dtype=np.uint8))[-bps:]
             bitmap[n] = bits_bin
 
-        object.__setattr__(self, "sqrt_order", root)
-        object.__setattr__(self, "bits_per_symbol", 2 * sp)
-        object.__setattr__(self, "_levels", levels)
+        scale = float(np.sqrt(np.mean(np.abs(symbols) ** 2)))
+        symbols = symbols / scale
+
+        object.__setattr__(self, "dims", dims)
+        object.__setattr__(self, "sqrt_order", dims[0])
+        object.__setattr__(self, "bits_per_symbol", bps)
+        object.__setattr__(self, "_levels_i", levels[0] / scale)
+        object.__setattr__(self, "_levels_q", levels[1] / scale)
+        object.__setattr__(self, "_gray_i", grays[0])
+        object.__setattr__(self, "_gray_q", grays[1])
+        object.__setattr__(self, "_pos_i", poss[0])
+        object.__setattr__(self, "_pos_q", poss[1])
         object.__setattr__(self, "_scale", scale)
-        object.__setattr__(self, "_gray", gray)
-        object.__setattr__(self, "_pos", pos)
         object.__setattr__(self, "symbols", symbols)
         object.__setattr__(self, "bitmap", bitmap)
 
@@ -160,15 +178,10 @@ class Constellation:
         """Map a bit stream (multiple of ``bits_per_symbol`` long) to symbols."""
         bps = self.bits_per_symbol
         n_sym = len(bits) // bps
-        bits = bits[: n_sym * bps].reshape(n_sym, 2, -1)  # (sym, {I,Q}, m) MSB-first
-        val_i = np.zeros(n_sym, dtype=np.int64)
-        val_q = np.zeros(n_sym, dtype=np.int64)
-        m = self.bits_per_symbol // 2
-        for k in range(m):
-            shift = m - 1 - k  # groups are MSB-first within each dimension
-            val_i |= bits[:, 0, k].astype(np.int64) << shift
-            val_q |= bits[:, 1, k].astype(np.int64) << shift
-        idx = val_i * self.sqrt_order + val_q
+        chunks = bits[: n_sym * bps].reshape(n_sym, bps)
+        idx = np.zeros(n_sym, dtype=np.int64)
+        for k in range(bps):
+            idx = (idx << 1) | chunks[:, k].astype(np.int64)
         out: NDArray[np.complex128] = self.symbols[idx]
         return out
 
@@ -177,47 +190,52 @@ class Constellation:
         return self.bitmap[idx].reshape(-1)
 
     # -- position<->level maps ----------------------------------------------- *
-    def _level_to_position(self, bin_val: NDArray[np.int64]) -> NDArray[np.int64]:
-        """Binary value -> int position within the Gray-coded dimension."""
-        gray = _gray_seq(self.sqrt_order)
-        pos_of = np.empty(self.sqrt_order, np.int64)
-        pos_of[gray] = np.arange(self.sqrt_order)
-        return pos_of[bin_val]
-
+    @staticmethod
     def _demap_dim(
-        self, samples: NDArray[np.float64]
+        samples: NDArray[np.float64], levels: NDArray[np.float64]
     ) -> tuple[NDArray[np.int64], NDArray[np.float64]]:
-        """Nearest level decision per dimension (+ distance)."""
-        dist = (samples[:, None] - self._levels[None, :]) ** 2
+        """Nearest level decision per dimension (+ squared distance)."""
+        dist = (samples[:, None] - levels[None, :]) ** 2
         pos = np.argmin(dist, axis=1)
         return pos, dist[np.arange(len(samples)), pos]
 
-    def _position_to_label(self, pos: NDArray[np.int64]) -> NDArray[np.int64]:
+    @staticmethod
+    def _position_to_label(pos: NDArray[np.int64], gray: NDArray[np.int64]) -> NDArray[np.int64]:
         """Amplitude-sorted position within a dimension -> Gray bit label."""
-        return self._gray[pos]
+        return gray[pos]
 
     def nearest_index(self, samples: NDArray[np.complex128]) -> NDArray[np.int64]:
         """Nearest constellation-point index for each received sample."""
-        i_pos, _ = self._demap_dim(samples.real)
-        q_pos, _ = self._demap_dim(samples.imag)
-        return self._position_to_label(i_pos) * self.sqrt_order + self._position_to_label(q_pos)
+        i_pos, _ = self._demap_dim(samples.real, self._levels_i)
+        q_pos, _ = self._demap_dim(samples.imag, self._levels_q)
+        n_q = self.dims[1]
+        return self._position_to_label(i_pos, self._gray_i) * n_q + self._position_to_label(
+            q_pos, self._gray_q
+        )
 
     def symbol_error_distance(
         self, samples: NDArray[np.complex128]
     ) -> tuple[NDArray[np.int64], NDArray[np.float64]]:
         """Nearest (label, squared distance) before constellation scaling."""
-        i_pos, d_i = self._demap_dim(samples.real)
-        q_pos, d_q = self._demap_dim(samples.imag)
-        idx = self._position_to_label(i_pos) * self.sqrt_order + self._position_to_label(q_pos)
+        i_pos, d_i = self._demap_dim(samples.real, self._levels_i)
+        q_pos, d_q = self._demap_dim(samples.imag, self._levels_q)
+        n_q = self.dims[1]
+        idx = self._position_to_label(i_pos, self._gray_i) * n_q + self._position_to_label(
+            q_pos, self._gray_q
+        )
         return idx, d_i + d_q
 
     @property
     def symmetry_order(self) -> int:
-        """Rotational symmetry of the square-QAM lattice (rotations in 2*pi/k).
+        """Rotational symmetry of the QAM lattice (rotations in 2*pi/k).
 
-        Square M-QAM is invariant under quarter turns only, never under 45°.
+        Square M-QAM is invariant under quarter turns; the rectangular
+        cross-QAM (2 x 4) has no rotational symmetry, so only the identity
+        rotation is explored.
         """
-        return 4
+        if self.dims[0] == self.dims[1]:
+            return 4
+        return 1
 
     @property
     def decision_radius2_i(self) -> float:
@@ -246,6 +264,13 @@ def QPSK() -> Constellation:
     return _make(4, "QPSK")
 
 
+def QAM8() -> Constellation:
+    """8-QAM constellation (rectangular 2 x 4 cross), cached."""
+    if 8 not in Constellation._cache:
+        Constellation._cache[8] = Constellation(order=8, name="8-QAM", dims=(2, 4))
+    return Constellation._cache[8]
+
+
 def QAM16() -> Constellation:
     """16-QAM constellation, cached."""
     return _make(16, "16-QAM")
@@ -257,11 +282,19 @@ def QAM64() -> Constellation:
 
 
 def get_constellation(name: str) -> Constellation:
-    """Resolve a modulation-format name to a cached :class:`Constellation`."""
+    """Resolve a modulation-format name to a cached :class:`Constellation`.
+
+    Accepts plain formats (``QPSK``, ``8QAM``, ``16-QAM``, ``64QAM``) and
+    their dual-polarisation aliases (``DP-QPSK``, ``DP-8QAM``, ...), case
+    insensitive and with dashes stripped.
+    """
     normalized = name.strip().upper().replace("-", "")
+    if normalized.startswith("DP"):
+        normalized = normalized[2:]
     return {
         "QPSK": QPSK,
         "4QAM": QPSK,
+        "8QAM": QAM8,
         "16QAM": QAM16,
         "64QAM": QAM64,
     }[normalized]()

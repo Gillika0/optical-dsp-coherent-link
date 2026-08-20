@@ -152,16 +152,28 @@ def measure_ber(
 
 
 def theoretical_ber_qam(snr_db: float, order: int) -> float:
-    """Exact-AWGN approximate bit-error rate for Gray-coded square M-QAM.
+    """Exact-AWGN approximate bit-error rate for Gray-coded M-QAM.
+
+    Square M-QAM uses the classic product-of-PAM approximation:
 
     .. math:: P_b \\approx \\frac{4}{\\log_2 M}\\Big(1-\\frac{1}{\\sqrt M}\\Big)
               Q\\!\\left(\\sqrt{\\frac{3 E_s/N_0}{M-1}}\\right)
+
+    The rectangular 8-QAM (2 x 4 cross) is a product of a 2-PAM and a 4-PAM;
+    both dimensions share the scaled level spacing ``d = 2/sqrt(6)`` so the
+    per-adjacent-level tail is ``Q(d sqrt(2 Es/N0)/2) = Q(sqrt(Es/N0/3))`` and
+    ``SER = Q + 1.5 Q - 1.5 Q^2``, ``P_b = SER / log2(8)``.
     """
-    assert order in (4, 16, 64, 256)
+    assert order in (4, 8, 16, 64, 256)
     m = float(order)
     es_no = 10.0 ** (snr_db / 10.0)
-    sqrt_m = np.sqrt(m)
-    p = (4.0 / np.log2(m)) * (1.0 - 1.0 / sqrt_m) * q_function(np.sqrt(3.0 * es_no / (m - 1.0)))
+    if order == 8:
+        q = float(q_function(np.sqrt(es_no / 3.0)))
+        ser = q + 1.5 * q - 1.5 * q * q
+        p = ser / 3.0
+    else:
+        sqrt_m = np.sqrt(m)
+        p = (4.0 / np.log2(m)) * (1.0 - 1.0 / sqrt_m) * q_function(np.sqrt(3.0 * es_no / (m - 1.0)))
     return float(np.clip(p, 0.0, 1.0))
 
 
@@ -319,3 +331,84 @@ def adc_target_metrics(
         )
     i_res, q_res = out
     return i_res, q_res
+
+
+def resolve_fec(name: str | None) -> FecCode | None:
+    """Map a FEC-mode string (``none``/``hd``/``strong``) to its code."""
+    return {
+        None: None,
+        "none": None,
+        "hd": HD_FEC_RS255_239,
+        "strong": STRONG_FEC_RS255_213,
+    }.get(name.strip().lower() if isinstance(name, str) else name)
+
+
+def line_rate_gbps(symbol_rate: float, order: int, npol: int = 2) -> float:
+    """Raw line rate ``R = npol * Rs * log2(M)`` in Gbps."""
+    return float(npol * symbol_rate * np.log2(order) / 1e9)
+
+
+def net_rate_gbps(line_rate: float, fec_code: FecCode | None) -> float:
+    """Net information rate after FEC overhead ``(1 - (n-k)/n)``."""
+    if fec_code is None:
+        return line_rate
+    return line_rate * fec_code.k / fec_code.n
+
+
+def spectral_efficiency_bits_s_hz(order: int, npol: int = 2) -> float:
+    """Spectral efficiency ``npol * log2(M)`` bits/s/Hz (symbol-rate grid)."""
+    return float(npol * np.log2(order))
+
+
+def _snr_for_ber(order: int, ber_target: float) -> float:
+    """Invert :func:`theoretical_ber_qam` by bisection (dB)."""
+    lo, hi = -10.0, 45.0
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        if theoretical_ber_qam(mid, order) > ber_target:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def required_osnr_db(
+    symbol_rate: float,
+    order: int,
+    target_ber: float,
+    ref_bw_hz: float,
+    npol: int = 2,
+) -> float:
+    """OSNR (dB, in ``ref_bw_hz``) needed to reach ``target_ber`` on AWGN.
+
+    Inverse of :func:`optical_dsp.utils.osnr_db_to_snr_db`: the per-pol symbol
+    SNR is ``Es/N0 = OSNR * B_ref / (Rs * npol)``.
+    """
+    snr_db = _snr_for_ber(order, target_ber)
+    osnr_lin = 10.0 ** (snr_db / 10.0) * symbol_rate * npol / ref_bw_hz
+    return float(10.0 * np.log10(osnr_lin))
+
+
+def fec_coding_gain_db(order: int, code: FecCode, target_post_ber: float = 1e-12) -> float:
+    """Net coding gain (dB) of ``code`` at ``target_post_ber``.
+
+    The gain is the SNR difference between the *uncoded* system operating at
+    ``target_post_ber`` and the coded system operating at the pre-FEC BER that
+    the decoder just brings down to ``target_post_ber`` (the code threshold).
+    """
+    p_thr = _pre_fec_threshold_ber(code, target_post_ber)
+    snr_coded = _snr_for_ber(order, p_thr)
+    snr_uncoded = _snr_for_ber(order, target_post_ber)
+    return snr_uncoded - snr_coded
+
+
+def _pre_fec_threshold_ber(code: FecCode, target_post_ber: float) -> float:
+    """Pre-FEC BER where ``apply_fec`` reaches ``target_post_ber``."""
+    lo, hi = 1e-6, 0.25
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        if apply_fec(mid, code) > target_post_ber:
+            hi = mid
+        else:
+            lo = mid
+    return 0.5 * (lo + hi)

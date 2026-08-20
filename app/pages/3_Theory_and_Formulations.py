@@ -1,7 +1,7 @@
-"""Theory companion page for the coherent optical link & DSP simulator.
+"""Theory companion page for the optical DSP simulator.
 
 Explains what each block does and why the simulated waterfall always sits
-above the ideal AWGN curve. Reachable from the sidebar navigation of the
+above the ideal AWGN curve. Reachable from the landing page navigation of the
 dashboard (``streamlit run app/main.py``).
 """
 
@@ -23,7 +23,7 @@ def _h(text: str) -> None:
 
 
 def main() -> None:
-    st.title("Coherent optical link: theory companion")
+    st.title("Theory and formulations")
     _md(
         "This page is a short, self-contained recap of the physics and DSP "
         "behind the simulator. Every block below maps 1:1 to a module under "
@@ -32,10 +32,11 @@ def main() -> None:
 
     _h("1. System architecture")
     _md(
-        "The link transmits **dual-polarisation (PDM)** QPSK/16-QAM/64-QAM "
-        "symbols through a dispersive, nonlinear fibre, then recovers them "
-        "with a full coherent receiver. The simulation is monochromatic "
-        "(single optical carrier, complex baseband):"
+        "The link transmits **dual-polarisation (PDM)** "
+        "QPSK/8-QAM/16-QAM/64-QAM symbols through a dispersive, nonlinear "
+        "fibre, then recovers them with a full coherent receiver. The "
+        "simulation is monochromatic (single optical carrier, complex "
+        "baseband):"
     )
     _md(
         "```\n"
@@ -62,10 +63,10 @@ def main() -> None:
     _h("2. Transmitter")
     _md(
         "**Symbols and bits.** The payload is drawn from a seeded uniform RNG "
-        "and mapped to a Gray-coded square-QAM constellation normalized to unit "
-        "mean power. Gray coding guarantees that adjacent constellation points "
-        "differ by one bit, so the bit-error rate tracks the symbol-error rate "
-        "without an extra factor."
+        "and mapped to a Gray-coded square-QAM constellation (rectangular 2×4 "
+        "for 8-QAM) normalized to unit mean power. Gray coding guarantees that "
+        "adjacent constellation points differ by one bit, so the bit-error rate "
+        "tracks the symbol-error rate without an extra factor."
     )
     _math(r"E[|s|^2] = 1")
     _md(
@@ -222,7 +223,10 @@ def main() -> None:
         "preamble, then **MMA** (multi-modulus algorithm) takes over to the "
         "end. MMA is decision-free and robust: a pure decision-directed "
         "start-up on 16-QAM is fragile because wrong early decisions feed "
-        "back into the taps and can push the filter into a degenerate basin."
+        "back into the taps and can push the filter into a degenerate basin. "
+        "For the rectangular 8-QAM cross the two per-dimension radii are "
+        "derived from the marginal I/Q moments (the I and Q rails sit at "
+        "different radii)."
     )
     _math(
         r"\mathrm{MMA:}\quad J = \mathbb{E}\big[(u^2-R_I)^2 + (v^2-R_Q)^2\big],"
@@ -271,9 +275,12 @@ def main() -> None:
         r"Q\!\left(\sqrt{\frac{3\,E_s/N_0}{M-1}}\right)"
     )
     _md(
-        "with $Q(x)=\\frac12\\mathrm{erfc}(x/\\sqrt2)$. The Q-factor is the "
-        "inverse-tail figure $Q = \\sqrt2\\,\\mathrm{erfc}^{-1}(2P_b)$, "
-        "reported in dB."
+        "The rectangular 8-QAM cross is a product of a 2-PAM (I) and a 4-PAM "
+        "(Q): both dimensions share the scaled level spacing $d=2/\\sqrt6$ so "
+        "the per-adjacent-level tail is $Q(d\\sqrt{2E_s/N_0}/2) = "
+        "Q(\\sqrt{E_s/N_0/3})$ and $P_b = \\frac{1}{3}[Q + \\tfrac32 Q - "
+        "\\tfrac32 Q^2]$. The Q-factor is the inverse-tail figure "
+        "$Q = \\sqrt2\\,\\mathrm{erfc}^{-1}(2P_b)$, reported in dB."
     )
 
     _h("9. Forward error correction")
@@ -336,7 +343,7 @@ def main() -> None:
     _md(
         "| Block | Module | Default |\n"
         "|---|---|---|\n"
-        "| Constellation | ``optical_dsp/utils.py`` | unit-power Gray QAM |\n"
+        "| Constellation | ``optical_dsp/utils.py`` | unit-power Gray QAM (incl. 8-QAM) |\n"
         "| RRC shaping | ``physics/transmitter.py`` | 33 taps, $\\beta=0.2$ |\n"
         "| Laser | ``physics/laser.py`` | 100 kHz linewidth |\n"
         "| Fibre | ``physics/channel.py`` | SSFM, $\\Delta z=0.5$ km, Manakov |\n"

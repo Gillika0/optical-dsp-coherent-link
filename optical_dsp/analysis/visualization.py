@@ -561,3 +561,178 @@ def plot_convergence(
     title = "Equalizer adaptation error"
     fig.update_layout(**_base_layout(title, "Block index (64 symbols)", ylabel))
     return fig
+
+
+def plot_imdd_eye(
+    signal: NDArray[np.float64],
+    sps: int,
+    title: str = "IM/DD eye diagram",
+    thresholds: Sequence[float] | None = None,
+    eye_metrics: dict[str, object] | None = None,
+    max_traces: int = 4000,
+    target_sps: int = 32,
+    opacity: float = 0.1,
+) -> go.Figure:
+    """Multi-level (intensity) eye diagram with decision-threshold guides.
+
+    The photocurrent is mean-normalised so the PAM rails sit at their average
+    optical-power levels; the sampling instant is the column of maximum
+    variance. Decision thresholds (midpoints between adjacent measured rails)
+    are drawn as dashed horizontal lines, and the EOP / eye-linearity metrics
+    are reported in the title when ``eye_metrics`` is supplied.
+    """
+    if sps < target_sps:
+        up = int(np.ceil(target_sps / sps))
+        signal = resample_poly(signal, up, 1)
+        sps = sps * up
+    period = 2 * sps
+    n = len(signal) // sps * sps
+    grid = signal[:n].reshape(-1, sps)
+    off = int(np.argmax(np.var(grid, axis=0)))
+    mean_val = float(np.mean(signal)) if len(signal) else 1.0
+    norm: NDArray[np.float64] = signal / max(mean_val, 1e-30)
+
+    centers = np.arange(sps + off, n - sps + 1, sps)
+    stride = max(1, int(np.ceil(centers.size / max_traces)))
+    centers = centers[::stride]
+    t = np.arange(period) / sps
+    x = np.empty(centers.size * (period + 1))
+    y = np.empty_like(x)
+    for k, center in enumerate(centers):
+        base = k * (period + 1)
+        x[base : base + period] = t
+        x[base + period] = np.nan
+        y[base : base + period] = norm[center - sps : center + sps]
+        y[base + period] = np.nan
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scattergl(
+            x=x,
+            y=y,
+            mode="lines",
+            line={"color": "#1f77b4", "width": 0.9},
+            opacity=opacity,
+            hoverinfo="skip",
+            showlegend=False,
+        )
+    )
+    fig.add_vline(x=1.0, line_dash="dot", line_color="#111111", opacity=0.7)
+    fig.add_vline(x=0.5, line_dash="dot", line_color=_PLOTLY_GREY, opacity=0.45)
+    fig.add_vline(x=1.5, line_dash="dot", line_color=_PLOTLY_GREY, opacity=0.45)
+    th_list = list(thresholds) if thresholds else []
+    ymax = 0.0
+    for th in th_list:
+        fig.add_hline(y=th, line_dash="dash", line_color="#d62728", opacity=0.8)
+        ymax = max(ymax, float(th))
+    yrange = [0.0, max(1.2 * ymax, 1.1)] if th_list else [0.0, 1.6]
+
+    if eye_metrics:
+        eop = eye_metrics.get("eop_db")
+        lin = eye_metrics.get("eye_linearity")
+        if eop is not None and lin is not None:
+            title = (
+                f"{title}<br><sup>EOP {eop:.1f} dB · eye linearity {lin:.2f} · M-level eye</sup>"
+            )
+    fig.update_layout(
+        title=title,
+        height=440,
+        template="plotly_white",
+        font={"size": 12},
+        margin={"l": 60, "r": 20, "t": 80, "b": 50},
+        showlegend=False,
+        xaxis={"title": "Time / symbol periods", "range": [0.0, 2.0]},
+        yaxis={"title": "Normalised photocurrent", "range": yrange},
+    )
+    return fig
+
+
+def plot_sensitivity_waterfall(
+    rop_dbm: Sequence[float],
+    curves: dict[str, Sequence[float]],
+    crossings: dict[str, float] | None = None,
+    target_ber: float = 1e-3,
+    title: str = "Receiver sensitivity: BER vs optical power",
+) -> go.Figure:
+    """BER vs received optical power (ROP) for each receiver type.
+
+    Semi-log plot of the simulated sensitivity waterfall with a dashed target
+    line and vertical markers at the power where each receiver first crosses
+    ``target_ber``. PIN and APD curves are coloured blue and red.
+    """
+    colors = {"PIN": "#1f77b4", "APD": "#d62728"}
+    fig = go.Figure()
+    for rx, ber_curve in curves.items():
+        safe = [max(float(b), 1e-15) for b in ber_curve]
+        fig.add_trace(
+            go.Scatter(
+                x=list(rop_dbm),
+                y=safe,
+                mode="markers+lines",
+                name=f"{rx} (simulated)",
+                marker={"size": 7, "color": colors.get(rx, "#1f77b4")},
+                line={"color": colors.get(rx, "#1f77b4"), "width": 1.8},
+            )
+        )
+        cross = crossings.get(rx) if crossings else None
+        if cross is not None and np.isfinite(cross):
+            fig.add_vline(
+                x=float(cross),
+                line_dash="dot",
+                line_color=colors.get(rx, "#1f77b4"),
+                opacity=0.7,
+                annotation_text=f"{rx} {cross:.1f} dBm",
+                annotation_position="top left",
+            )
+    fig.add_hline(
+        y=target_ber,
+        line_dash="dash",
+        line_color="#333333",
+        opacity=0.8,
+        annotation_text=f"target {target_ber:.0e}",
+        annotation_position="bottom right",
+    )
+    fig.update_layout(
+        **_base_layout(title, "Received optical power (dBm)", "BER"),
+        yaxis={"type": "log", "range": [-15.0, 0.0]},
+        xaxis={"range": [min(rop_dbm) - 1.0, max(rop_dbm) + 1.0]},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02},
+    )
+    return fig
+
+
+def plot_link_budget_bar(
+    budget: Sequence[tuple[str, float | None, float]],
+    title: str = "IM/DD link budget",
+) -> go.Figure:
+    """Waterfall bar chart of the link budget stages.
+
+    ``budget`` items are ``(label, increment_db, cumulative_db)`` where
+    ``increment_db is None`` marks an absolute ("total") bar: transmitter
+    power, received power and receiver sensitivity. Relative bars (connector,
+    fibre, splitter losses and system margin) chain onto the running total so
+    the waterfall lands on the sensitivity target.
+    """
+    labels = [item[0] for item in budget]
+    measures = [
+        "total" if i == 0 or item[1] is None else "relative" for i, item in enumerate(budget)
+    ]
+    values = [0.0 if item[1] is None else float(item[1]) for item in budget]
+    fig = go.Figure(
+        go.Waterfall(
+            x=labels,
+            y=values,
+            measure=measures,
+            increasing={"marker": {"color": "#2ca02c"}},
+            decreasing={"marker": {"color": "#d62728"}},
+            totals={"marker": {"color": "#1f77b4"}},
+            connector={"line": {"color": "#999999", "dash": "dot", "width": 1}},
+            text=[f"{v:.1f} dB" for v in values],
+            textposition="outside",
+        )
+    )
+    fig.update_layout(
+        **_base_layout(title, "Link budget stage", "Power / loss (dB)"),
+        showlegend=False,
+    )
+    return fig

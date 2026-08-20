@@ -22,9 +22,10 @@ possible, and reproducible (seeded PRNGs everywhere).
 
 Pipeline summary (see `optical_dsp/pipeline.py`, `LinkConfig`/`run_link`):
 
-1. **Transmitter** — uniform random payload bits, Gray-mapped to QPSK/16/64-QAM,
-   RRC pulse shaping (unit-energy normalisation, so launch power in dBm is exact),
-   shared Wiener phase noise from the TX laser, PDM power split.
+1. **Transmitter** — uniform random payload bits, Gray-mapped to QPSK/8-QAM/16-QAM/64-QAM
+   (rectangular 2×4 cross for 8-QAM), RRC pulse shaping (unit-energy normalisation,
+   so launch power in dBm is exact), shared Wiener phase noise from the TX laser,
+   PDM power split.
 2. **Fibre channel** — symmetric split-step Fourier method solving the coupled
    (Manakov) nonlinear Schrödinger equation, with an analytical linear-channel
    reference for verification. A link can be split into any number of spans
@@ -52,11 +53,11 @@ Pipeline summary (see `optical_dsp/pipeline.py`, `LinkConfig`/`run_link`):
 
 ```bash
 pip install -e ".[dev]"
-pytest tests -q              # 68 tests: engine, DSP, metrics, end-to-end
+pytest tests -q              # ~98 tests: engine, DSP, metrics, end-to-end, IM/DD
 ruff check .                 # lint
 mypy optical_dsp             # strict type check
 
-# dashboard (Streamlit + Plotly), with a "Theory" companion page
+# dashboard (Streamlit + Plotly): landing hub + 3 pages
 streamlit run app/main.py
 ```
 
@@ -75,10 +76,13 @@ print(f'EVM {r.evm_percent[0]:.1f}/{r.evm_percent[1]:.1f}% BER {r.ber.ber:.1e}')
 optical_dsp/
   physics/     transmitter (RRC, PRBS), laser, fibre channel (SSFM), EDFA
   dsp/         front-end (IQ, ADC, retiming), CDC, MIMO equalizer, carrier recovery
-  analysis/    metrics (EVM/BER/Q/SNR), Plotly visualisations
-  pipeline.py  LinkConfig + run_link (the one simulation entry point)
-app/main.py   Streamlit dashboard
-tests/        pytest suite against the library + analytical references
+  analysis/    metrics (EVM/BER/Q/SNR, KPI helpers), Plotly visualisations
+  imdd.py      IM/DD & short-reach (PON) engine (PAM-N, chirp, PIN/APD, FFE/DFE)
+  pipeline.py  LinkConfig + run_link (coherent simulation entry point)
+app/
+  main.py      landing hub
+  pages/       coherent transmission, direct detection & PON, theory companion
+tests/         pytest suite against the library + analytical references
 ```
 
 ## Physics spot-check
@@ -95,7 +99,8 @@ OSNR-imposed AWGN floor (e.g. QPSK at OSNR 22 dB → ~13% EVM, theoretical floor
   (the CMA/BPS 4-fold phase ambiguity is resolved per polarisation).
 - **OSNR** is referenced to a 0.1 nm resolution bandwidth, standard for 1550 nm
   WDM links; the dashboard waterfall compares simulated BER against the exact
-  AWGN formula for Gray-coded square M-QAM.
+  AWGN formula for Gray-coded square M-QAM (and the closed form for the
+  rectangular 8-QAM cross).
 
 ## License
 

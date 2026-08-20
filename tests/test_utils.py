@@ -5,10 +5,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from optical_dsp.utils import (
+    QAM8,
     QAM16,
     QAM64,
     QPSK,
-    Constellation,
     beta2_from_D,
     db_to_linear,
     dbm_to_w,
@@ -19,35 +19,36 @@ from optical_dsp.utils import (
 )
 
 
-@pytest.mark.parametrize("factory", [QPSK, QAM16, QAM64])
+@pytest.mark.parametrize("factory", [QPSK, QAM8, QAM16, QAM64])
 def test_unit_energy(factory) -> None:
     const = factory()
     assert np.isclose(np.mean(np.abs(const.symbols) ** 2), 1.0)
 
 
-@pytest.mark.parametrize("factory", [QPSK, QAM16, QAM64])
-def test_symmetry_is_quarter_turn(factory) -> None:
-    const = factory()
-    assert const.symmetry_order == 4
-    # quarter-turn invariance of the constellation set
-    assert np.allclose(
-        np.sort(np.angle(const.symbols * np.exp(1j * np.pi / 2))), np.sort(np.angle(const.symbols))
-    )
+def test_8qam_geometry() -> None:
+    const = QAM8()
+    assert const.order == 8
+    assert const.dims == (2, 4)
+    assert const.symmetry_order == 1  # the 2x4 cross is not 90-degree invariant
+    # unit-power scale: I in {+-1/sqrt(6)}, Q in {+-1/sqrt(6), +-3/sqrt(6)}
+    assert np.allclose(np.unique(const.symbols.real), [-1.0, 1.0] / np.sqrt(6.0))
+    assert np.allclose(np.unique(const.symbols.imag), [-3.0, -1.0, 1.0, 3.0] / np.sqrt(6.0))
 
 
-def test_bits_roundtrip_qam16() -> None:
+@pytest.mark.parametrize("factory", [QPSK, QAM8, QAM16, QAM64])
+def test_bits_roundtrip(factory) -> None:
     rng = np.random.default_rng(0)
-    const = QAM16()
-    bits = rng.integers(0, 2, 4096, dtype=np.uint8)
+    const = factory()
+    bits = rng.integers(0, 2, const.order * 256 * const.bits_per_symbol, dtype=np.uint8)
     sym = const.bits_to_symbols(bits)
     idx = const.nearest_index(sym)
     assert np.array_equal(const.symbols_to_bits(idx), bits)
 
 
-@pytest.mark.parametrize("order", [4, 16, 64])
-def test_decision_radius(order: int) -> None:
-    const = Constellation(order=order)
-    idx = np.arange(order, dtype=np.int64)
+@pytest.mark.parametrize("factory", [QPSK, QAM8, QAM16, QAM64])
+def test_decision_radius(factory) -> None:
+    const = factory()
+    idx = np.arange(const.order, dtype=np.int64)
     sym = const.symbols[idx]
     # correct symbols are the closest to themselves
     assert np.array_equal(const.nearest_index(sym), idx)
@@ -57,6 +58,11 @@ def test_get_constellation_names() -> None:
     assert get_constellation("QPSK") is QPSK()
     assert get_constellation("16-qam") is QAM16()
     assert get_constellation("64QAM") is QAM64()
+    assert get_constellation("8-QAM") is QAM8()
+    assert get_constellation("DP-QPSK") is QPSK()
+    assert get_constellation("DP-8QAM") is QAM8()
+    assert get_constellation("DP-16QAM") is QAM16()
+    assert get_constellation("dp-64qam") is QAM64()
     with pytest.raises(KeyError):
         get_constellation("8PSK")
 
