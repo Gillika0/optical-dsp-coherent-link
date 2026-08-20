@@ -178,8 +178,7 @@ def main() -> None:
         "The primary receiver design target is a set of **voltage levels at "
         "the ADC input**, not the eye diagram: the eye is only the result of "
         "achieving those levels. For QPSK the photodiode + TIA output handed "
-        "to the ADC should meet the following specification (the dashboard "
-        "reports the measured values for every run):"
+        "to the ADC should meet the following specification:"
     )
     _md(
         "- **Four symbol levels, two per quadrature** — the I branch swings "

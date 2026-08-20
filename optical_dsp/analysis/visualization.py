@@ -32,32 +32,21 @@ def plot_constellation(
 ) -> go.Figure:
     """Scatter plot of received (recovered) symbols against the constellation.
 
-    The received points are fitted to the reference scale (residual gain/phase
-    removed), the axes are forced to equal aspect ratio and the limits are
-    locked to a symmetric square around the constellation ring (default
-    [-2, 2] for QPSK/16-QAM) so the eye-like clustering is not squeezed into a
-    strip.
+    The received points are power-normalised (unit mean symbol energy) so they
+    sit at the same scale as the unit-energy ideal constellation, and the axes
+    are locked to a strict 1:1 aspect ratio with fixed limits [-2, 2] so the
+    clustering is not squeezed into a strip.
     """
     z = samples[:n_show]
-    if ref_symbols is not None and len(z):
-        n = min(len(z), len(ref_symbols))
-        z, ref = z[:n], ref_symbols[:n]
-        if np.vdot(z, z).real > 0.0:
-            beta = complex(np.vdot(ref, z) / np.vdot(z, z))
-            z = beta * z
-        radius = max(float(np.percentile(np.abs(z), 99.0)), float(np.percentile(np.abs(ref), 99.0)))
-    elif len(z):
-        radius = float(np.percentile(np.abs(z), 99.0))
-    else:
-        radius = 1.0
-    lim = max(2.0, 1.25 * radius)
+    if len(z):
+        z = z / np.sqrt(np.mean(np.abs(z) ** 2))
     fig = go.Figure()
     fig.add_trace(
         go.Scattergl(
             x=z.real,
             y=z.imag,
             mode="markers",
-            marker={"size": 3, "color": "#1f77b4", "opacity": 0.35},
+            marker={"size": 4, "color": "#1f77b4", "opacity": 0.4},
             name="received",
         )
     )
@@ -73,8 +62,8 @@ def plot_constellation(
         )
     fig.update_layout(
         **_base_layout(title, "In-phase", "Quadrature"),
-        xaxis={"range": [-lim, lim], "scaleanchor": "y", "scaleratio": 1},
-        yaxis={"range": [-lim, lim]},
+        xaxis={"range": [-2, 2], "scaleanchor": "y", "scaleratio": 1},
+        yaxis={"range": [-2, 2]},
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.02},
     )
     return fig
@@ -168,18 +157,16 @@ def plot_eye(
             opacity=0.7,
             row=1,
             col=idx,
-            annotation_text="decision",
-            annotation_position="top",
         )
         fig.add_vline(x=0.5, line_dash="dot", line_color=_PLOTLY_GREY, opacity=0.45, row=1, col=idx)
         fig.add_vline(x=1.5, line_dash="dot", line_color=_PLOTLY_GREY, opacity=0.45, row=1, col=idx)
     fig.add_hline(y=0.0, line_dash="dash", line_color=_PLOTLY_GREY, opacity=0.5)
     fig.update_layout(
         title=title,
-        height=420,
+        height=440,
         template="plotly_white",
         font={"size": 12},
-        margin={"l": 60, "r": 20, "t": 60, "b": 50},
+        margin={"l": 60, "r": 20, "t": 80, "b": 50},
         showlegend=False,
     )
     fig.update_xaxes(title_text="Time / symbol periods", range=[0.0, 2.0], row=1, col=1)

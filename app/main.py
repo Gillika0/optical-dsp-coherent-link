@@ -13,12 +13,10 @@ from __future__ import annotations
 import warnings
 
 import numpy as np
-import pandas as pd
 import streamlit as st
 from optical_dsp.analysis.metrics import (
     HD_FEC_RS255_239,
     STRONG_FEC_RS255_213,
-    adc_target_metrics,
     apply_fec,
     evm_to_snr_db,
     q_factor_from_ber,
@@ -302,109 +300,14 @@ def _constellation_tabs(res: LinkResult) -> None:
         )
 
 
-def _voltage_level_spec(res: LinkResult) -> None:
-    """Primary design target: the ADC voltage levels the DSP must see.
-
-    The eye diagrams are only a *result* of these voltages; this table is the
-    actual specification. Measured values are taken from the photodiode + TIA
-    output handed to the ADC (pre-DSP, best sampling instant).
-    """
-    st.header("Voltage level specification (target)")
-    i_res, q_res = adc_target_metrics(res.eye_pre[:, 0], res.config.sps)
-    pre = res.eye_pre[:, 0]
-    fs_i = 3.5 * float(np.sqrt(np.mean(pre.real**2)))
-    fs_q = 3.5 * float(np.sqrt(np.mean(pre.imag**2)))
-    vpp = i_res.vpp
-    fmt = lambda x: f"{x:+.4f} V"  # noqa: E731
-    spec_df = pd.DataFrame(
-        [
-            [
-                "ADC input range (full scale)",
-                "±V_sat (≥ Vpp/2, no saturation)",
-                f"{fmt(-fs_i).lstrip('+')} .. {fmt(fs_i)} / "
-                f"{fmt(-fs_q).lstrip('+')} .. {fmt(fs_q)}",
-                "Sets the vertical scale of the eye; too small clips it, too large wastes ADC bits",
-            ],
-            [
-                "I-branch levels (2 QPSK)",
-                f"±Vpp/2 = {fmt(vpp / 2)}",
-                f"{fmt(i_res.level_neg)} / {fmt(i_res.level_pos)}",
-                "Sets the eye opening height on the I branch",
-            ],
-            [
-                "Q-branch levels (2 QPSK)",
-                f"±Vpp/2 = {fmt(vpp / 2)}",
-                f"{fmt(q_res.level_neg)} / {fmt(q_res.level_pos)}",
-                "Sets the eye opening height on the Q branch",
-            ],
-            [
-                "Level spacing (adjacent)",
-                "Vpp, equal on I and Q",
-                f"{fmt(i_res.spacing)} / {fmt(q_res.spacing)}",
-                "Equal spacing maximises the noise margin (Euclidean distance) between symbols",
-            ],
-            [
-                "Decision thresholds",
-                "0 V (midway between the two levels)",
-                "0 V (design)",
-                "Slicer threshold sits at the eye centre; the widest-open point",
-            ],
-            [
-                "Symmetry bias (DC offset)",
-                "0 V (symmetric ± swing)",
-                f"{fmt(i_res.bias)} / {fmt(q_res.bias)}",
-                "Off-centre bias skews the eye and moves the working point off the threshold",
-            ],
-            [
-                "Clipping (beyond full scale)",
-                "0%",
-                f"{100 * i_res.clip_fraction:.3f}% / {100 * q_res.clip_fraction:.3f}%",
-                "Saturation flattens the eye top/bottom and distorts the outer levels",
-            ],
-        ],
-        columns=["Parameter", "Target", "Measured (this run)", "How it affects the eye opening"],
-    )
-    st.dataframe(spec_df, hide_index=True, use_container_width=True)
-
-    vpp2 = vpp / 2
-    symbols = pd.DataFrame(
-        [
-            ["00", fmt(vpp2), fmt(vpp2)],
-            ["01", fmt(vpp2), fmt(-vpp2)],
-            ["10", fmt(-vpp2), fmt(vpp2)],
-            ["11", fmt(-vpp2), fmt(-vpp2)],
-        ],
-        columns=["QPSK symbol (bits)", "I level (target)", "Q level (target)"],
-    )
-    st.caption("The four QPSK symbols, each a pair of I/Q levels at ±Vpp/2.")
-    st.dataframe(symbols, hide_index=True, use_container_width=True)
-
-    spacing_mismatch = (
-        abs(i_res.spacing - q_res.spacing) / max(i_res.spacing, q_res.spacing, 1e-12) * 100
-    )
-    st.caption(
-        "Achieving these voltages — by tuning the modulator bias (centres the "
-        "swing), LO power (signal level) and TIA gain (fills the ADC range) — "
-        "opens the eye and gives the DSP the levels it needs to recover the "
-        "symbols. The eye diagrams below are verification only, not the "
-        "target. Note the ADC full scale is auto-set to 3.5× RMS, so clipping "
-        "reads 0%; the pre-DSP eye can look closed before chromatic-dispersion "
-        "compensation even though these levels are correct."
-        + (
-            f" Spacing mismatch: {spacing_mismatch:.2f}%."
-            if spacing_mismatch == spacing_mismatch
-            else ""
-        )
-    )
-
-
 def _eye_tabs(res: LinkResult) -> None:
-    st.header("Eye diagrams — verification (secondary)")
+    st.header("Eye diagrams")
     st.caption(
-        "The eye is the *result* of the voltage levels specified above: the "
-        "post-DSP opening height is set by the level spacing, its centring by "
-        "the zero decision threshold/bias, its vertical scale by the ADC "
-        "full-scale setting, and flat tops would indicate clipping."
+        "Pre-DSP eye on the photodiode + TIA output (which can look closed "
+        "before chromatic-dispersion compensation) vs the post-DSP eye after "
+        "CDC and the matched filter: the opening height is set by the symbol "
+        "level spacing, its centring by the (zero) decision threshold, and "
+        "flat tops would indicate ADC clipping."
     )
     tab_x, tab_y = st.tabs(["Polarisation X", "Polarisation Y"])
     sps = res.config.sps
@@ -463,7 +366,6 @@ def main() -> None:
         st.warning("Sidebar settings changed since the last run - press Run again.")
     _show_metrics(res)
     _constellation_tabs(res)
-    _voltage_level_spec(res)
     _eye_tabs(res)
 
     st.header("Optical / electrical spectrum (PSD)")
