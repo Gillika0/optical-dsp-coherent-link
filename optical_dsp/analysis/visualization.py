@@ -7,7 +7,7 @@ from collections.abc import Sequence
 import numpy as np
 import plotly.graph_objects as go
 from numpy.typing import NDArray
-from scipy.signal import welch
+from scipy.signal import resample_poly, welch
 
 _PLOTLY_GREY = "#999999"
 
@@ -64,33 +64,50 @@ def plot_eye(
     sps: int,
     title: str = "Eye diagram",
     branches: Sequence[str] = ("I", "Q"),
-    max_traces: int = 600,
+    max_traces: int = 3000,
     normalize: bool = True,
+    target_sps: int = 32,
+    opacity: float = 0.08,
 ) -> go.Figure:
-    """Density eye diagram, one subplot per quadrature branch.
+    """Overlaid continuous-trace eye diagram, one subplot per quadrature branch.
 
-    A 2-D histogram of ``(time, amplitude)`` over many 2-symbol windows is far
-    more readable than raw overlaid polylines (which smear into a blob at
-    high OSNR): the rails light up as bright horizontal bands and the symbol
-    transitions as crossing paths. The signal is normalised to unit peak
-    envelope so the eye fills the plot regardless of the received optical
-    power. For QPSK each branch shows two rails; for 16-QAM four.
+    If the signal has fewer than ``target_sps`` samples per symbol it is
+    first interpolated with a bandlimited polyphase-sinc resampler (16-32
+    samples/symbol), so the transitions are smooth rather than a handful of
+    discrete points. The waveform is then sliced into 2-symbol windows centred
+    on the sampling instant and each window is drawn as a continuous low-alpha
+    line (``opacity`` ~ 0.05-0.1); thousands of overlapping windows accumulate
+    into the classic eye shape. Each branch is emitted as a single WebGL trace
+    with NaN gaps between windows. The decision instant sits at ``t = 1.0``
+    symbol period, the x-axis spans strictly [0, 2], and the amplitude is
+    normalised to the decision-instant level so the rails sit at ~±1.
     """
     from plotly.subplots import make_subplots
 
+    if sps < target_sps:
+        up = int(np.ceil(target_sps / sps))
+        signal = resample_poly(signal, up, 1)
+        sps = sps * up
     period = 2 * sps
-    n = len(signal)
-    frames = n // period * period
-    eye = signal[:frames].reshape(-1, period)
-    if normalize and eye.size:
-        peak = float(np.percentile(np.abs(signal), 99.0))
+    n = len(signal) // sps * sps
+    if n < 3 * sps:
+        pad = np.zeros(sps, dtype=np.complex128)
+        signal = np.concatenate([pad, signal, pad])
+        n = len(signal) // sps * sps
+    grid = signal[:n].reshape(-1, sps)
+    off = int(np.argmax(np.var(grid.real, axis=0) + np.var(grid.imag, axis=0)))
+    if normalize:
+        # scale by the decision-instant amplitude (not the transition
+        # overshoot), so the rails land at ~+-1 and the eye always fills
+        # the plot regardless of received optical power
+        dec = grid[:, off]
+        peak = float(np.percentile(np.abs(dec), 99.0))
         if peak > 0.0:
-            eye = eye / peak
-    # cap the number of 2-symbol windows fed to the histogram
-    stride = max(1, int(np.ceil(eye.shape[0] / 4000)))
-    eye = eye[::stride]
+            signal = signal / peak
+    centers = np.arange(sps + off, n - sps + 1, sps)
+    stride = max(1, int(np.ceil(centers.size / max_traces)))
+    centers = centers[::stride]
     t = np.arange(period) / sps
-    tt = np.tile(t, eye.shape[0])
 
     colors = {"I": "#1f77b4", "Q": "#d62728"}
     fig = make_subplots(
@@ -100,24 +117,41 @@ def plot_eye(
         shared_yaxes=True,
     )
     for idx, branch in enumerate(branches, start=1):
-        data = eye.real if branch == "I" else eye.imag
+        data = signal.real if branch == "I" else signal.imag
         c = colors.get(branch, "#1f77b4")
+        x = np.empty(centers.size * (period + 1))
+        y = np.empty_like(x)
+        for k, center in enumerate(centers):
+            base = k * (period + 1)
+            x[base : base + period] = t
+            x[base + period] = np.nan
+            y[base : base + period] = data[center - sps : center + sps]
+            y[base + period] = np.nan
         fig.add_trace(
-            go.Histogram2d(
-                x=tt,
-                y=data.ravel(),
-                xbins={"start": 0.0, "end": 2.0, "size": 2.0 / 100.0},
-                ybins={"start": -1.3, "end": 1.3, "size": 2.6 / 120.0},
-                colorscale=[[0.0, "#ffffff"], [0.35, "#deebf7"], [1.0, c]],
-                showscale=False,
-                zsmooth="best",
-                hovertemplate="t=%{x:.2f}<br>amp=%{y:.2f}<br>samples=%{z}<extra></extra>",
+            go.Scattergl(
+                x=x,
+                y=y,
+                mode="lines",
+                line={"color": c, "width": 0.9},
+                opacity=opacity,
+                hoverinfo="skip",
+                showlegend=False,
             ),
             row=1,
             col=idx,
         )
-        fig.add_vline(x=0.5, line_dash="dot", line_color=_PLOTLY_GREY, opacity=0.6, row=1, col=idx)
-        fig.add_vline(x=1.5, line_dash="dot", line_color=_PLOTLY_GREY, opacity=0.6, row=1, col=idx)
+        fig.add_vline(
+            x=1.0,
+            line_dash="dot",
+            line_color="#111111",
+            opacity=0.7,
+            row=1,
+            col=idx,
+            annotation_text="decision",
+            annotation_position="top",
+        )
+        fig.add_vline(x=0.5, line_dash="dot", line_color=_PLOTLY_GREY, opacity=0.45, row=1, col=idx)
+        fig.add_vline(x=1.5, line_dash="dot", line_color=_PLOTLY_GREY, opacity=0.45, row=1, col=idx)
     fig.add_hline(y=0.0, line_dash="dash", line_color=_PLOTLY_GREY, opacity=0.5)
     fig.update_layout(
         title=title,
@@ -127,7 +161,8 @@ def plot_eye(
         margin={"l": 60, "r": 20, "t": 60, "b": 50},
         showlegend=False,
     )
-    fig.update_xaxes(title_text="Time / symbol periods", row=1, col=1)
+    fig.update_xaxes(title_text="Time / symbol periods", range=[0.0, 2.0], row=1, col=1)
+    fig.update_xaxes(range=[0.0, 2.0], row=1, col=2)
     fig.update_yaxes(title_text="Amplitude (normalised)", row=1, col=1)
     return fig
 
