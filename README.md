@@ -93,6 +93,36 @@ Run `streamlit run app/main.py` and pick a page:
   waterfall draws the transmitter power as a solid bar rising from 0 up to the
   launch level.
 
+## Screenshots
+
+Landing hub:
+
+<img src="screenshots/hub.png" width="700" alt="Landing hub">
+
+Coherent module — KPI bar and recovered constellations:
+
+<img src="screenshots/coherent_top.png" width="700" alt="Coherent: KPIs and constellations">
+
+Coherent module — BER-vs-OSNR waterfall against the AWGN theory curve:
+
+<img src="screenshots/coherent_waterfall.png" width="700" alt="Coherent: BER waterfall">
+
+Coherent module — Kerr nonlinear penalty vs launch power:
+
+<img src="screenshots/coherent_penalty.png" width="700" alt="Coherent: nonlinear penalty">
+
+Direct-detection (IM/DD) module — KPI row and pre/post-equalizer eye diagrams:
+
+<img src="screenshots/imdd_top.png" width="700" alt="IM/DD: eyes">
+
+Direct-detection module — receiver sensitivity waterfall (PIN vs APD):
+
+<img src="screenshots/imdd_sensitivity.png" width="700" alt="IM/DD: sensitivity">
+
+Direct-detection module — passive optical link budget:
+
+<img src="screenshots/imdd_budget.png" width="700" alt="IM/DD: link budget">
+
 ## Package layout
 
 ```
